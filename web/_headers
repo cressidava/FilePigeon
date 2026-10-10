@@ -11,3 +11,8 @@
 /FilePigeon-setup.exe
   Content-Disposition: attachment; filename="FilePigeon-setup.exe"
   Cache-Control: no-cache
+
+# Installed copies check this for updates: always fetch it fresh.
+/update/latest.json
+  Cache-Control: no-cache
+  Content-Type: application/json

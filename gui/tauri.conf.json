@@ -2,7 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FilePigeon",
   "mainBinaryName": "filepigeon-desktop",
-  "version": "0.1.0",
   "identifier": "app.filepigeon.desktop",
   "build": {
     "frontendDist": "ui",
@@ -28,8 +27,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/pigeon-32.png", "icons/pigeon-128.png", "icons/pigeon-256.png", "icons/pigeon.ico"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/pigeon-32.png",
+      "icons/pigeon-128.png",
+      "icons/pigeon-256.png",
+      "icons/pigeon.ico"
+    ],
     "publisher": "FilePigeon",
     "category": "Utility",
     "shortDescription": "Secure, direct PC-to-PC file transfer",
@@ -43,6 +49,18 @@
         "installerIcon": "icons/pigeon.ico",
         "displayLanguageSelector": false,
         "installerHooks": "installer-hooks.nsh"
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGNTYyRDQ0RjIxQzc0QjgKUldTNGRCenlSQzFXejNpWjE2Szk2dDVPSGdNdTcyWCsxQ3NHS3M4RmlzditEU3dkdG1iaFpidVQK",
+      "endpoints": [
+        "https://joinfp.panno.tech/update/latest.json"
+      ],
+      "windows": {
+        "installMode": "quiet"
       }
     }
   }

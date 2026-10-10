@@ -1,9 +1,13 @@
 [package]
 name = "filepigeon"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Secure, direct PC-to-PC file transfer with pairing, accept/deny prompts and shared folders"
 license = "MIT"
+
+[workspace.package]
+# The one version number for the app, CLI and server (release.py bumps it).
+version = "0.2.0"
 
 [workspace]
 members = [".", "gui"]

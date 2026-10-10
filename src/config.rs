@@ -38,6 +38,9 @@ pub struct Config {
     /// Experimental: find paired devices over the public BitTorrent DHT
     /// when no rendezvous server is configured or reachable.
     pub dht: bool,
+    /// Desktop app: install downloaded updates by itself when idle (off =
+    /// show a "Restart to update" button instead).
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -58,6 +61,7 @@ impl Default for Config {
             prompt_timeout_secs: 120,
             invisible: false,
             dht: false,
+            auto_update: true,
         }
     }
 }

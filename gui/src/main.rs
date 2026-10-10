@@ -5,6 +5,7 @@
 
 mod autostart;
 mod linkscheme;
+mod updates;
 
 use filepigeon::app::App;
 use filepigeon::client::{self, Outcome};
@@ -396,6 +397,7 @@ struct GuiState {
     pairing: Mutex<Option<JoinHandle<()>>>,
     /// Sends in progress (peer + files), so one can't be started twice.
     sending: Mutex<std::collections::HashSet<String>>,
+    updates: updates::Updates,
     /// An invite link FilePigeon was opened with, until the window asks for it.
     invite_link: Mutex<Option<String>>,
     /// Tray "Do not disturb" check items, kept in sync with the mode.
@@ -404,6 +406,16 @@ struct GuiState {
 }
 
 impl GuiState {
+    /// Nothing the user would notice a restart in the middle of: no
+    /// transfers, no requests waiting, no pairing, and not in do-not-disturb.
+    fn is_idle(&self) -> bool {
+        let transferring = self.ui.transfers.lock().unwrap().values().any(|t| matches!(t.state, TransferState::Running));
+        let asking = !self.ui.pending.lock().unwrap().is_empty();
+        let pairing = self.pairing.lock().unwrap().as_ref().is_some_and(|h| !h.inner().is_finished());
+        let sending = !self.sending.lock().unwrap().is_empty();
+        !(transferring || asking || pairing || sending || self.ui.quiet.load(Ordering::Relaxed))
+    }
+
     async fn set_invisible(self: &Arc<Self>, invisible: bool) -> Result<(), String> {
         let paths = Paths::resolve().map_err(err)?;
         let mut cfg: Config = load_json(&paths.config()).map_err(err)?;
@@ -496,6 +508,8 @@ struct Settings {
     friend_address: String,
     #[serde(default)]
     invite_page: String,
+    #[serde(default = "yes")]
+    auto_update: bool,
     download_dir: String,
     upnp: bool,
     prompt_timeout_secs: u64,
@@ -527,6 +541,8 @@ struct Snapshot {
     quiet: bool,
     approvals: Vec<ApprovalItem>,
     autostart: bool,
+    version: String,
+    update: updates::UpdateView,
 }
 
 #[tauri::command]
@@ -555,6 +571,7 @@ fn get_state(window: WebviewWindow, state: State<'_, Arc<GuiState>>) -> CmdResul
             has_server_key,
             friend_address: cfg.friend_address,
             invite_page: cfg.invite_page,
+            auto_update: cfg.auto_update,
             download_dir: cfg.download_dir.display().to_string(),
             upnp: cfg.upnp,
             prompt_timeout_secs: cfg.prompt_timeout_secs,
@@ -572,6 +589,8 @@ fn get_state(window: WebviewWindow, state: State<'_, Arc<GuiState>>) -> CmdResul
         quiet: state.ui.quiet.load(Ordering::Relaxed),
         approvals: state.ui.approvals(),
         autostart: autostart::is_enabled(),
+        version: state.ui.handle.package_info().version.to_string(),
+        update: state.updates.view(&state.ui.handle),
     })
 }
 
@@ -644,6 +663,7 @@ async fn save_settings(window: WebviewWindow, state: State<'_, Arc<GuiState>>, s
     }
     cfg.friend_address = friend_address;
     cfg.invite_page = invite_page;
+    cfg.auto_update = settings.auto_update;
     cfg.download_dir = download;
     cfg.upnp = settings.upnp;
     cfg.prompt_timeout_secs = settings.prompt_timeout_secs;
@@ -1030,6 +1050,39 @@ fn spawn_send(state: &Arc<GuiState>, peer: String, paths: Vec<PathBuf>) -> CmdRe
     Ok(())
 }
 
+fn yes() -> bool {
+    true
+}
+
+#[tauri::command]
+fn update_status(window: WebviewWindow, state: State<'_, Arc<GuiState>>) -> CmdResult<updates::UpdateView> {
+    main_only(&window)?;
+    Ok(state.updates.view(&state.ui.handle))
+}
+
+/// "Check for updates": checks (and downloads) in the background; progress
+/// arrives as "update" events.
+#[tauri::command]
+fn update_check(window: WebviewWindow, state: State<'_, Arc<GuiState>>) -> CmdResult<()> {
+    main_only(&window)?;
+    let gui = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let app = gui.ui.handle.clone();
+        gui.updates.check(&app).await;
+    });
+    Ok(())
+}
+
+/// "Restart to update". Refused while something is going on.
+#[tauri::command]
+fn update_install(window: WebviewWindow, state: State<'_, Arc<GuiState>>) -> CmdResult<()> {
+    main_only(&window)?;
+    if !state.is_idle() {
+        return Err("Finish (or cancel) the transfers and requests in progress first.".into());
+    }
+    state.updates.install(&state.ui.handle)
+}
+
 /// Cancel a transfer (the Cancel button on its card).
 #[tauri::command]
 fn transfer_cancel(window: WebviewWindow, id: u64) -> CmdResult<()> {
@@ -1231,7 +1284,8 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
-    let start_hidden = std::env::args().any(|a| a == "--hidden");
+    let (relaunched_hidden, updated_from) = updates::after_update();
+    let start_hidden = relaunched_hidden || std::env::args().any(|a| a == "--hidden");
     autostart::refresh();
     linkscheme::register();
     tauri::Builder::default()
@@ -1245,6 +1299,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let ui = Arc::new(GuiUi::new(app.handle().clone()));
             let state = Arc::new(GuiState {
@@ -1253,6 +1308,7 @@ fn main() {
                 status: Mutex::new(ServiceStatus { state: "starting".into(), message: String::new() }),
                 pairing: Mutex::new(None),
                 sending: Mutex::new(Default::default()),
+                updates: Default::default(),
                 invite_link: Mutex::new(linkscheme::find_in_args(std::env::args())),
                 dnd_items: Mutex::new(Vec::new()),
                 invisible_item: Mutex::new(None),
@@ -1272,6 +1328,19 @@ fn main() {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             });
+            {
+                let (app, gui) = (app.handle().clone(), state.clone());
+                tauri::async_runtime::spawn(async move { updates::run(app, gui).await });
+            }
+            if let Some(from) = updated_from {
+                let gui = state.clone();
+                let now = app.package_info().version.to_string();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    gui.ui.log(format!("FilePigeon was updated from {from} to {now}."));
+                    gui.ui.toast("ok", format!("FilePigeon updated to {now}."));
+                });
+            }
             tauri::async_runtime::spawn(async move { state.restart_service().await });
             Ok(())
         })
@@ -1298,6 +1367,9 @@ fn main() {
             invite_revoke,
             invite_link_create,
             transfer_cancel,
+            update_status,
+            update_check,
+            update_install,
             invite_links_pending,
             invite_preview,
             take_invite_link,

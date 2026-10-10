@@ -1,6 +1,7 @@
 /target
 /gui/gen
 /web/FilePigeon-setup.exe
+/web/update/
 
 # Secrets: never commit server or device keys.
 *.pem

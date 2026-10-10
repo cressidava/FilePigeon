@@ -96,6 +96,8 @@ function renderChrome() {
   $("#me").innerHTML = me?.configured
     ? `<strong>${esc(me.settings.device_name)}</strong><span class="mono">${esc(me.device_id || "")}</span>`
     : "";
+  if (me?.version) $("#me").insertAdjacentHTML("beforeend", `<span class="version">FilePigeon ${esc(me.version)}${me.update?.stage === "ready" ? ` · <a href="#" id="me-update">update ready</a>` : ""}</span>`);
+  $("#me-update")?.addEventListener("click", (e) => { e.preventDefault(); setView("settings"); });
   $$("#dnd [data-dnd]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.dnd === S.dnd)));
   $("#dnd-now").classList.toggle("hidden", !S.quiet);
   const rb = $("#badge-requests");
@@ -652,6 +654,30 @@ function viewActivity(root) {
 }
 const logLine = (l) => `<div class="${l.text.startsWith("[security]") ? "sec" : ""}"><time>${clock(l.time)}</time>${esc(l.text)}</div>`;
 
+// ---------- Updates ----------
+const ago = (t) => { const s = Math.max(0, Math.round(Date.now() / 1000 - t)); return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
+function updateBox(u, version) {
+  u = u || {};
+  const checked = u.last_check ? ` <span class="muted">(checked ${ago(u.last_check)})</span>` : "";
+  const line = {
+    checking: `<span class="spinner"></span> Checking for updates…`,
+    downloading: `<span class="spinner"></span> Downloading ${esc(u.available)}… ${u.progress != null ? `${u.progress}%` : ""}`,
+    ready: `<strong>FilePigeon ${esc(u.available)} is ready.</strong> ${u.auto_install ? "It installs by itself the next time nothing is happening." : ""}`,
+    installing: `<span class="spinner"></span> Installing… FilePigeon restarts in a moment.`,
+    up_to_date: `You have the latest version.${checked}`,
+    error: `<span style="color:var(--danger)">${esc(u.error || "Update check failed.")}</span>${checked}`,
+  }[u.stage] || `Updates are checked automatically.${checked}`;
+  return `<p style="margin:0 0 8px">This is <strong>FilePigeon ${esc(version || u.current || "")}</strong>.</p>
+    <p style="margin:0 0 10px">${line}</p>
+    ${u.notes && (u.stage === "ready" || u.stage === "downloading") ? `<p class="muted" style="margin:0 0 10px;white-space:pre-wrap">${esc(u.notes)}</p>` : ""}
+    <div class="row">${u.stage === "ready" ? `<button type="button" class="btn primary" id="upd-install">Restart to update</button>` : ""}
+      <button type="button" class="btn" id="upd-check" ${["checking", "downloading", "installing"].includes(u.stage) ? "disabled" : ""}>Check for updates</button></div>`;
+}
+function wireUpdateBox(root) {
+  $("#upd-check", root)?.addEventListener("click", () => call("update_check"));
+  $("#upd-install", root)?.addEventListener("click", () => call("update_install"));
+}
+
 // ---------- Settings ----------
 function viewSettings(root) {
   const s = S.snap.settings;
@@ -689,6 +715,10 @@ function viewSettings(root) {
         <label><input type="radio" name="dnd" value="on" ${S.dnd === "on" ? "checked" : ""}><span>On<small>Never pop up.</small></span></label>
       </div>
       <small class="muted" style="display:block;margin-bottom:4px">While quiet, requests wait on the Requests page for up to 14 minutes instead of being denied. When quiet ends, anything still waiting pops up. Changes here take effect immediately.</small>
+      <hr><h2>About &amp; updates</h2>
+      <div id="update-box">${updateBox(S.snap.update, S.snap.version)}</div>
+      <label class="switch" style="margin:10px 0 6px"><input type="checkbox" name="auto_update" ${s.auto_update !== false ? "checked" : ""}>Install updates automatically</label>
+      <small class="muted" style="display:block;margin:0 0 4px 44px">Updates download in the background and install when nothing is happening (no transfers, no requests, not in do not disturb), then FilePigeon restarts. Only updates signed with your release key are accepted.</small>
       <hr><h2>Network</h2>
       <label class="switch" style="margin-bottom:6px"><input type="checkbox" name="upnp" ${s.upnp ? "checked" : ""}>Allow temporary router port mapping (UPnP) when a direct connection needs it</label>
       <small class="muted" style="display:block;margin:0 0 14px 44px">The mapping lasts only while a transfer is active and is removed afterwards.</small>
@@ -699,6 +729,7 @@ function viewSettings(root) {
     </form>`;
   wireBanner(root);
   $("#first-join", root)?.addEventListener("click", () => openJoin());
+  wireUpdateBox(root);
   const form = $("#form", root);
   $("#pick-dl", root).onclick = async () => {
     const p = await call("pick_folder", { title: "Where should received files go?" });
@@ -741,6 +772,7 @@ function viewSettings(root) {
       rendezvous_key: form.rendezvous_key.value,
       friend_address: form.friend_address.value,
       invite_page: form.invite_page.value,
+      auto_update: form.auto_update.checked,
       download_dir: form.download_dir.value,
       upnp: form.upnp.checked,
       prompt_timeout_secs: Number(form.prompt_timeout_secs.value),
@@ -832,6 +864,12 @@ async function main() {
     } finally { reload(); }
   };
   await listen("invisible", () => reload());
+  await listen("update", (e) => {
+    if (S.snap) S.snap.update = e.payload;
+    const box = $("#update-box");
+    if (box) { box.innerHTML = updateBox(e.payload, S.snap?.version); wireUpdateBox(box); }
+    renderChrome();
+  });
   await listen("invite-link", async () => { const l = await invoke("take_invite_link"); if (l) openJoin(l); });
   setInterval(tickRequests, 1000);
   window.addEventListener("focus", () => { if (!$("#modal-root").innerHTML) reload(); });
