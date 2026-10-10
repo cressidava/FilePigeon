@@ -162,6 +162,20 @@ filepigeon invite create "Sam"                  # a raw key to hand over yoursel
 | `--no-relay` | off | Only help with direct connections; never forward data. Only UDP 7400 needed. |
 | `--no-stealth` | off | Answer anyone without a knock (not recommended). |
 
+### Releasing updates
+
+The desktop app updates itself: it checks `https://<invite site>/update/latest.json` a minute after starting and every 6 hours, downloads newer versions in the background, verifies their signature against the release key built into the app, and installs them when idle (no transfers, requests, pairing or do not disturb), then restarts. Settings → About & updates shows the version and has **Check for updates**; turning off **Install updates automatically** shows a **Restart to update** button instead.
+
+To release:
+
+```bash
+python scripts/release.py 0.2.2 "What changed"
+```
+
+It sets the version (one `[workspace.package]` version for everything), builds the signed installer, and stages `web/FilePigeon-setup.exe`, `web/update/` and `web/update/latest.json`. Then upload the `web` folder as a new Cloudflare deployment.
+
+The signing key lives outside the repo at `%USERPROFILE%\.filepigeon-release\updater.key` (its public half is in `gui/tauri.conf.json`). Back it up somewhere safe. If it's lost, installed copies can't accept new updates and everyone reinstalls once; if it leaks, someone could sign updates (they'd also need your invite site to deliver them).
+
 ### Invite page on Cloudflare Pages
 
 1. Copy the installer into `web/` as `FilePigeon-setup.exe` (it's git-ignored).
