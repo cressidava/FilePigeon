@@ -148,6 +148,9 @@ struct Relay {
     limit_bytes: u64,
     per_device: Mutex<HashMap<String, usize>>,
     per_ip: Mutex<HashMap<IpAddr, usize>>,
+    /// Live sessions: port -> (key owner that asked for it, its stop switch),
+    /// so revoking a friend also ends their relay sessions.
+    sessions: Mutex<HashMap<u16, ([u8; 32], Arc<tokio::sync::Notify>)>>,
 }
 
 struct RelaySession {
@@ -158,8 +161,9 @@ struct RelaySession {
 }
 
 impl Relay {
-    /// Take a port for a session requested by `device` from `ip`.
-    fn create(self: &Arc<Self>, device: &str, ip: IpAddr) -> Option<RelaySession> {
+    /// Take a port for a session requested by `device` from `ip`, using the
+    /// key of gate owner `owner`.
+    fn create(self: &Arc<Self>, device: &str, ip: IpAddr, owner: [u8; 32]) -> Option<RelaySession> {
         {
             let mut per = self.per_device.lock().unwrap();
             let mut per_ip = self.per_ip.lock().unwrap();
@@ -183,6 +187,7 @@ impl Relay {
         filepigeon::os_random(&mut theirs);
         let cancel = Arc::new(tokio::sync::Notify::new());
         let cancelled = cancel.clone();
+        self.sessions.lock().unwrap().insert(port, (owner, cancel.clone()));
         let relay = self.clone();
         let device = device.to_string();
         tokio::spawn(async move {
@@ -190,6 +195,7 @@ impl Relay {
             if forwarded > 0 {
                 log(&format!("relay session on port {port} ended ({} forwarded)", human(forwarded)));
             }
+            relay.sessions.lock().unwrap().remove(&port);
             relay.pool.lock().unwrap().push((port, sock));
             relay.release(&device, ip);
         });
@@ -372,6 +378,7 @@ async fn main() -> Result<()> {
             limit_bytes: args.relay_limit_mb * 1024 * 1024,
             per_device: Default::default(),
             per_ip: Default::default(),
+            sessions: Default::default(),
         }))
     };
     let invites = access.live_invites().len();
@@ -426,6 +433,13 @@ async fn main() -> Result<()> {
                     .collect();
                 for conn in &revoked {
                     conn.close(CLOSE_REVOKED.into(), b"access revoked");
+                }
+                if let Some(relay) = &server.relay {
+                    for (_, (owner, stop)) in relay.sessions.lock().unwrap().iter() {
+                        if !access.valid_label(owner) {
+                            stop.notify_one();
+                        }
+                    }
                 }
                 if !revoked.is_empty() {
                     log(&format!("closed {} connection(s) that used a revoked invite", revoked.len()));
@@ -578,9 +592,7 @@ async fn serve_connection(
     observed: SocketAddr,
 ) -> Result<()> {
     let id = id.to_string();
-    // Admins manage invites, and only while using the owner key: a friend's
-    // invite (or someone replaying a knock made with one) never grants that.
-    let is_admin = owner == OWNER_LABEL && server.access.is_admin(pk);
+    let pk = *pk;
 
     while let Ok((send, recv)) = conn.accept_bi().await {
         // Rate limits follow the device and the IP, not the connection, so
@@ -593,7 +605,7 @@ async fn serve_connection(
         }
         let (server, conn, id) = (server.clone(), conn.clone(), id.clone());
         tokio::spawn(async move {
-            if let Err(e) = handle_stream(&server, &conn, &id, is_admin, observed, send, recv).await {
+            if let Err(e) = handle_stream(&server, &conn, &id, &pk, owner, observed, send, recv).await {
                 log(&format!("{id}: {e:#}"));
             }
         });
@@ -617,7 +629,8 @@ async fn handle_stream(
     server: &Server,
     conn: &quinn::Connection,
     id: &str,
-    is_admin: bool,
+    pk: &[u8; 32],
+    owner: [u8; 32],
     observed: SocketAddr,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
@@ -626,8 +639,17 @@ async fn handle_stream(
     // Timing starts once the request has fully arrived, so a requester can't
     // shrink the padding by sending its request slowly.
     let started = Instant::now();
+    // An invite link's temporary key is for joining the inviter's slot and
+    // nothing else: whoever holds a leaked link can't use the server.
+    if !matches!(req, RdvRequest::PairJoinSlot { .. } | RdvRequest::Prove { .. }) && server.access.join_only(&owner) {
+        let message = "this key only works for joining an invite".to_string();
+        return write_msg(&mut send, &RdvResponse::Error { message }).await;
+    }
+    // Admins manage invites, and only while using the owner key: a friend's
+    // invite (or someone replaying a knock made with one) never grants that.
+    // Checked per request, so removing an admin takes effect at once.
     let admin_only = matches!(req, RdvRequest::InviteCreate { .. } | RdvRequest::InviteList | RdvRequest::InviteRevoke { .. });
-    if admin_only && !is_admin {
+    if admin_only && !(owner == OWNER_LABEL && server.access.is_admin(pk)) {
         let message = "only the server's admin devices can manage invites".to_string();
         return write_msg(&mut send, &RdvResponse::Error { message }).await;
     }
@@ -645,6 +667,16 @@ async fn handle_stream(
                     RdvResponse::Invite { key: format!("{}{}", server.identity_hex, hex::encode(secret)) }
                 }
                 Err(e) => RdvResponse::Error { message: format!("{e:#}") },
+            };
+            write_msg(&mut send, &resp).await?;
+        }
+        RdvRequest::Prove { nonce } => {
+            let resp = match (hex::decode(&nonce), server.access.secret_for(&owner)) {
+                (Ok(n), Some(secret)) if n.len() == 16 => {
+                    let pk: [u8; 32] = hex::decode(&server.identity_hex)?.try_into().map_err(|_| anyhow::anyhow!("bad key"))?;
+                    RdvResponse::Proof { mac: hex::encode(filepigeon::invites::server_proof(&secret, &n, &pk)) }
+                }
+                _ => RdvResponse::Error { message: "bad proof request".into() },
             };
             write_msg(&mut send, &resp).await?;
         }
@@ -701,7 +733,8 @@ async fn handle_stream(
             log(&format!("{id} online"));
         }
         RdvRequest::Connect { target, local_addrs } => {
-            let listener = server.online.lock().unwrap().get(&target).cloned();
+            // (Asking to be introduced to yourself is never legitimate.)
+            let listener = if target == id { None } else { server.online.lock().unwrap().get(&target).cloned() };
             let mut mine = vec![observed];
             mine.extend(local_addrs.into_iter().take(4));
             let approved = match listener {
@@ -723,9 +756,10 @@ async fn handle_stream(
             }
         }
         RdvRequest::Relay { target } => {
-            let listener = server.online.lock().unwrap().get(&target).cloned();
+            // A relay to yourself would just be a free UDP forwarder.
+            let listener = if target == id { None } else { server.online.lock().unwrap().get(&target).cloned() };
             let session = match (&server.relay, listener) {
-                (Some(relay), Some(listener)) => relay.create(id, observed.ip()).map(|s| (s, listener)),
+                (Some(relay), Some(listener)) => relay.create(id, observed.ip(), owner).map(|s| (s, listener)),
                 _ => None,
             };
             let Some((session, listener)) = session else {

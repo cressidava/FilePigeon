@@ -64,8 +64,8 @@ pub async fn revoke(app: &App, name: &str) -> Result<()> {
 
 /// The invite name used for a device paired with "give them my server".
 pub fn name_for_device(peer_name: &str, device_id: &str) -> String {
-    let short: String = crate::text::clean_name(peer_name).chars().take(48).collect();
-    format!("{short} ({})", &device_id[..device_id.len().min(8)])
+    let short: String = crate::text::clean_name(peer_name).chars().take(40).collect();
+    format!("{short} ({device_id})")
 }
 
 /// The address friends should use: `friend_address` if set, otherwise the
@@ -121,7 +121,7 @@ pub async fn gift_for(app: &App, peer_name: &str, peer_key: &[u8; 32]) -> Result
 pub enum Adopted {
     /// We had no server: now we use theirs.
     Now(String),
-    /// A fresh key for the server we already use (e.g. after re-pairing).
+    /// The same key we already have (e.g. after re-pairing): nothing changed.
     Refreshed(String),
     /// We already use a different server: kept ours.
     KeptOurs(String),
@@ -134,19 +134,22 @@ pub fn adopt(app: &App, gift: &ServerGift) -> Result<Adopted> {
     let (server_key, _) = parse_server_key(&gift.key)?;
     let paths = &app.paths;
     let mut cfg: crate::config::Config = crate::config::load_json(&paths.config())?;
+    let _ = server_key;
     let current = cfg.server_key().unwrap_or_default();
-    let same_server = parse_server_key(&current).map(|(k, _)| k == server_key).unwrap_or(false);
-    let outcome = if cfg.rendezvous.trim().is_empty() || current.is_empty() {
-        Adopted::Now(gift.address.clone())
-    } else if same_server {
-        Adopted::Refreshed(gift.address.clone())
-    } else {
-        return Ok(Adopted::KeptOurs(gift.address.clone()));
-    };
+    // A server key you already have is never replaced by one a peer sends:
+    // only a PC with no server takes a gift. (Re-pairing gets back the key it
+    // already has, so there's nothing to refresh.)
+    if !cfg.rendezvous.trim().is_empty() && !current.is_empty() {
+        return Ok(if current.eq_ignore_ascii_case(gift.key.trim()) {
+            Adopted::Refreshed(cfg.rendezvous.clone())
+        } else {
+            Adopted::KeptOurs(gift.address.clone())
+        });
+    }
     cfg.rendezvous = gift.address.clone();
     cfg.set_server_key(&gift.key)?;
     crate::config::save_json(&paths.config(), &cfg)?;
-    Ok(outcome)
+    Ok(Adopted::Now(gift.address.clone()))
 }
 
 // ---------------- invite codes ----------------
@@ -253,7 +256,7 @@ impl InviteCode {
         let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let mut master = [0u8; 32];
         argon
-            .hash_password_into(self.words.as_bytes(), b"filepigeon invite v1", &mut master)
+            .hash_password_into(self.words.as_bytes(), format!("filepigeon invite v2 {}", self.address).as_bytes(), &mut master)
             .map_err(|e| anyhow!("{e}"))?;
         let sub = |purpose: &str| blake3::derive_key(&format!("filepigeon invite v1 {purpose}"), &master);
         Ok(InviteSecrets {
@@ -277,6 +280,10 @@ pub struct PendingInvite {
     /// The temporary server key behind it (revoked once used).
     pub temp_invite: String,
     pub expires: u64,
+    /// Used (or cancelled), but its temporary key isn't confirmed revoked
+    /// yet: the background service keeps retrying.
+    #[serde(default)]
+    pub used: bool,
 }
 
 impl PendingInvite {
@@ -312,6 +319,43 @@ pub fn pending(app: &App) -> Vec<PendingInvite> {
 
 fn save_pending(app: &App, list: &[PendingInvite]) -> Result<()> {
     crate::config::save_json(&pending_path(app), &list.to_vec())
+}
+
+/// Invites still waiting for the friend (not used, not cancelled).
+pub fn waiting(app: &App) -> Vec<PendingInvite> {
+    pending(app).into_iter().filter(|p| !p.used).collect()
+}
+
+/// An invite was used or cancelled: stop waiting for it, and revoke its
+/// temporary key. If the server can't be reached, it stays marked for retry
+/// (see `retry_revokes`) instead of being forgotten with the key still live.
+pub async fn retire(app: &App, slot: &str) -> Result<()> {
+    let Some(p) = pending(app).into_iter().find(|p| p.slot == slot) else { return Ok(()) };
+    let mut list = pending(app);
+    for item in list.iter_mut().filter(|i| i.slot == slot) {
+        item.used = true;
+    }
+    save_pending(app, &list)?;
+    match revoke(app, &p.temp_invite).await {
+        Ok(()) => {
+            forget_pending(app, slot);
+            Ok(())
+        }
+        // Already gone on the server (e.g. revoked by hand): done.
+        Err(e) if e.to_string().contains("no invite by that name") => {
+            forget_pending(app, slot);
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Retry revoking used invites' temporary keys (they expire by themselves
+/// within a day regardless).
+pub async fn retry_revokes(app: &App) {
+    for p in pending(app).into_iter().filter(|p| p.used) {
+        let _ = retire(app, &p.slot).await;
+    }
 }
 
 /// Forget a pending invite (used, cancelled or expired).
@@ -355,6 +399,7 @@ pub async fn create_link(app: &App, friend: &str) -> Result<(InviteMessage, Pend
         slot,
         temp_invite,
         expires: now() + LINK_TTL,
+        used: false,
     };
     let mut list = pending(app);
     list.push(pending_invite.clone());
@@ -381,14 +426,19 @@ pub fn invite_message(app: &App, friend: &str, code: &InviteCode) -> InviteMessa
     InviteMessage { message, link, code: code.display() }
 }
 
-/// Cancel an unused invite: its temporary server key stops working.
+/// Cancel an unused invite: its temporary server key stops working. If the
+/// server can't be reached right now, the revoke is retried in the background.
 pub async fn cancel_link(app: &App, slot: &str) -> Result<()> {
-    let found = pending(app).into_iter().find(|p| p.slot == slot);
-    forget_pending(app, slot);
-    if let Some(p) = found {
-        revoke(app, &p.temp_invite).await?;
-    }
-    Ok(())
+    retire(app, slot).await
+}
+
+/// The server's answer to `Prove`: only a server holding the invite's knock
+/// secret can produce it, and it binds the server's own public key.
+pub fn server_proof(knock_secret: &[u8; 32], nonce: &[u8], server_pk: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new_keyed(&blake3::derive_key("filepigeon server proof v1", knock_secret));
+    h.update(nonce);
+    h.update(server_pk);
+    *h.finalize().as_bytes()
 }
 
 /// Three words both sides of a pairing see; they match only if nobody is in

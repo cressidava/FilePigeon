@@ -243,7 +243,7 @@ async fn run(cli: Cli) -> Result<()> {
                     eprintln!("\nKeep FilePigeon running (the desktop app or `filepigeon serve`) until they use it.");
                 }
                 InviteCmd::Pending => {
-                    let list = filepigeon::invites::pending(&app);
+                    let list = filepigeon::invites::waiting(&app);
                     if list.is_empty() {
                         println!("No unused invite links.");
                     }
@@ -258,7 +258,7 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                 }
                 InviteCmd::Cancel { name } => {
-                    let found = filepigeon::invites::pending(&app).into_iter().find(|p| p.friend.eq_ignore_ascii_case(name.trim()));
+                    let found = filepigeon::invites::waiting(&app).into_iter().find(|p| p.friend.eq_ignore_ascii_case(name.trim()));
                     let Some(p) = found else { bail!("no unused invite link for {name:?}") };
                     filepigeon::invites::cancel_link(&app, &p.slot).await?;
                     println!("Cancelled the invite for {}.", p.friend);

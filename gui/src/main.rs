@@ -309,11 +309,12 @@ impl Ui for GuiUi {
         self.show_next();
         self.approvals_changed();
 
-        let handle = self.handle.clone();
+        // Runs however this ends: answered, timed out, or abandoned because
+        // the other side gave up, even before the future was first polled
+        // (the request and its pop-up must never linger).
+        let cleanup = ApprovalCleanup { handle: self.handle.clone(), id };
         Box::pin(async move {
-            // Runs however this ends: answered, timed out, or abandoned
-            // because the other side gave up (the pop-up must not linger).
-            let _cleanup = ApprovalCleanup { handle: handle.clone(), id };
+            let _cleanup = cleanup;
             let answer = tokio::time::timeout(Duration::from_secs(timeout), rx).await;
             matches!(answer, Ok(Ok(true)))
         })
@@ -750,11 +751,14 @@ async fn pair_join(
     give_server: bool,
 ) -> CmdResult<PairResult> {
     main_only(&window)?;
+    if filepigeon::invites::InviteCode::find(&code).is_some() {
+        return Err("That's an invite: use \"I have an invite\" on the Devices page, so you can compare the check words.".into());
+    }
     let app = App::load().map_err(err)?;
     if give_server {
         filepigeon::invites::friend_address(&app).map_err(err)?;
     }
-    let paired = pairing::join_any(&app, &code, give_server, &|_| {}).await.map_err(|e| format!("{e:#}"))?;
+    let paired = pairing::join(&app, &code, give_server).await.map_err(|e| format!("{e:#}"))?;
     Ok(finish_pairing(state.inner(), paired).await)
 }
 
@@ -784,7 +788,7 @@ async fn invite_link_create(window: WebviewWindow, name: String) -> CmdResult<fi
 fn invite_links_pending(window: WebviewWindow) -> CmdResult<Vec<InviteLinkView>> {
     main_only(&window)?;
     let app = App::load().map_err(err)?;
-    Ok(filepigeon::invites::pending(&app)
+    Ok(filepigeon::invites::waiting(&app)
         .into_iter()
         .map(|p| {
             let m = filepigeon::invites::invite_message(&app, &p.friend, &p.code());

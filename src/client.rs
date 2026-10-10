@@ -396,6 +396,7 @@ async fn send_inner(
         PeerResponse::Accepted { offsets } => {
             progress.set_phase(Phase::Transferring);
             send_files(&mut send, files, &offsets, progress).await?;
+            progress.seal();
             send.finish()?;
             let mut complete: Complete = read_msg(&mut recv).await?;
             // The receiver's report is peer-supplied text.

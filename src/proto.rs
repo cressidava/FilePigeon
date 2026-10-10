@@ -29,6 +29,10 @@ pub enum RdvRequest {
     PairHold { slot: String },
     /// Join the slot named in an invite link.
     PairJoinSlot { slot: String },
+    /// Invite joiners first: "prove you hold my invite's key". The server
+    /// answers with a MAC over this nonce and its own public key, keyed with
+    /// the knock secret the connection used.
+    Prove { nonce: String },
     /// Direct connection failed: forward encrypted packets through the server.
     Relay { target: String },
     /// Admin only: give a friend their own server key (replaces one with the
@@ -76,6 +80,7 @@ pub enum RdvResponse {
     /// A friend's server key (128 hex, the same format as `--show-key`).
     Invite { key: String },
     Invites { invites: Vec<InviteInfo> },
+    Proof { mac: String },
     Error { message: String },
 }
 

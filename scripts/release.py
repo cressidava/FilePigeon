@@ -1,11 +1,13 @@
 """Build and stage a FilePigeon release for automatic updates.
 
-    python scripts/release.py 0.2.1 "What changed, in a sentence or two"
+    python scripts/release.py 0.2.3 "What changed, in a sentence or two"
 
 1. Sets the version (Cargo.toml [workspace.package]).
-2. Builds the signed installer. The signing key never leaves this PC: it's
-   read from %USERPROFILE%\\.filepigeon-release\\updater.key (override with
-   FILEPIGEON_UPDATER_KEY).
+2. Builds the installer, then signs it in a separate step (scripts/signing.py:
+   a password-protected key whose password is DPAPI-encrypted for your Windows
+   account). The key never enters the build environment.
+   --legacy-key signs with the old unprotected key instead (only needed once,
+   for the release that moves installed copies onto the new key).
 3. Puts the installer, and update/latest.json describing it, in web/.
 
 Then upload the web folder to Cloudflare (Workers & Pages -> filepigeon ->
@@ -21,9 +23,12 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import signing  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SITE = os.environ.get("FILEPIGEON_SITE", "https://joinfp.panno.tech")
-KEY = pathlib.Path(os.environ.get("FILEPIGEON_UPDATER_KEY", pathlib.Path.home() / ".filepigeon-release" / "updater.key"))
+LEGACY_KEY = pathlib.Path.home() / ".filepigeon-release" / "updater.key"
 
 
 def fail(msg):
@@ -36,9 +41,14 @@ def as_tuple(v):
 
 
 def main():
-    if len(sys.argv) < 2 or not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
-        fail('usage: python scripts/release.py X.Y.Z "release notes"')
-    version, notes = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args or not re.fullmatch(r"\d+\.\d+\.\d+", args[0]):
+        fail('usage: python scripts/release.py X.Y.Z "release notes" [--legacy-key] [--rebuild]')
+    version, notes = args[0], (args[1] if len(args) > 1 else "")
+    legacy = "--legacy-key" in sys.argv
+    key = LEGACY_KEY if legacy else signing.KEY
+    if not key.exists():
+        fail(f"signing key not found at {key}")
 
     cargo = ROOT / "Cargo.toml"
     text = cargo.read_text(encoding="utf-8")
@@ -48,25 +58,28 @@ def main():
     current = m.group(2)
     if as_tuple(version) < as_tuple(current) or (version == current and "--rebuild" not in sys.argv):
         fail(f"{version} isn't newer than {current} (add --rebuild to rebuild {current})")
-    if not KEY.exists():
-        fail(f"signing key not found at {KEY}")
     cargo.write_text(text[: m.start(2)] + version + text[m.end(2):], encoding="utf-8")
     print(f"version: {current} -> {version}")
 
-    env = dict(os.environ)
-    env["TAURI_SIGNING_PRIVATE_KEY"] = KEY.read_text(encoding="utf-8").strip()
-    env["TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] = ""
-    print("building the signed installer (a few minutes)...")
-    build = subprocess.run(["cargo", "tauri", "build"], cwd=ROOT / "gui", env=env, capture_output=True, text=True)
+    # Build without any signing key in the environment, so no dependency's
+    # build script ever sees it; the update signature is made afterwards.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TAURI_SIGNING_")}
+    print("building the installer (a few minutes)...")
+    build = subprocess.run(
+        ["cargo", "tauri", "build", "--config", json.dumps({"bundle": {"createUpdaterArtifacts": False}})],
+        cwd=ROOT / "gui", env=env, capture_output=True, text=True,
+    )
     if build.returncode != 0:
         print(build.stdout[-3000:], build.stderr[-3000:], sep="\n")
         fail("build failed")
 
     bundle = ROOT / "target" / "release" / "bundle" / "nsis"
     exe = bundle / f"FilePigeon_{version}_x64-setup.exe"
-    sig = bundle / f"FilePigeon_{version}_x64-setup.exe.sig"
-    if not exe.exists() or not sig.exists():
-        fail(f"expected {exe.name} and its .sig in {bundle}")
+    if not exe.exists():
+        fail(f"expected {exe.name} in {bundle}")
+    exe.with_name(exe.name + ".sig").unlink(missing_ok=True)
+    print(f"signing with {'the legacy key' if legacy else 'the protected key'}...")
+    sig = signing.sign(exe, key=key, pw="" if legacy else None)
 
     web = ROOT / "web"
     update = web / "update"

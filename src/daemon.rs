@@ -439,8 +439,13 @@ async fn run_rendezvous(ctx: &Arc<Ctx>) -> Result<()> {
 /// holding its slot on the server until the friend joins or it expires.
 async fn invite_holders(ctx: Arc<Ctx>) {
     let mut running: HashMap<String, AbortOnDrop> = HashMap::new();
+    let mut tick = 0u64;
     loop {
-        let pending = crate::invites::pending(&ctx.app);
+        tick += 1;
+        if tick % 300 == 1 {
+            crate::invites::retry_revokes(&ctx.app).await;
+        }
+        let pending = crate::invites::waiting(&ctx.app);
         running.retain(|slot, task| !task.0.is_finished() && pending.iter().any(|p| &p.slot == slot));
         for invite in pending {
             if running.contains_key(&invite.slot) {
@@ -456,10 +461,11 @@ async fn invite_holders(ctx: Arc<Ctx>) {
 
 async fn host_one_invite(ctx: Arc<Ctx>, invite: crate::invites::PendingInvite) {
     let result = crate::pairing::host_invite(&ctx.app, &ctx.ui, &invite).await;
-    // An invite is used up by one attempt: forget it, and revoke the
-    // temporary server key inside it (it would expire within a day anyway).
-    crate::invites::forget_pending(&ctx.app, &invite.slot);
-    let _ = crate::invites::revoke(&ctx.app, &invite.temp_invite).await;
+    // An invite is used up by one attempt: revoke its temporary server key,
+    // and forget it only once that's confirmed (retried otherwise).
+    if let Err(e) = crate::invites::retire(&ctx.app, &invite.slot).await {
+        ctx.ui.log(format!("[invite] couldn't revoke the used invite's key yet ({e:#}); will retry"));
+    }
     match result {
         Ok(paired) => {
             ctx.ui.log(format!(
@@ -746,6 +752,7 @@ async fn handle_request(
             progress.attach(conn);
             let result = async {
                 send_files(&mut send, &files, &offsets, &progress).await?;
+                progress.seal();
                 anyhow::Ok(read_msg::<_, Complete>(&mut recv).await?)
             }
             .await;

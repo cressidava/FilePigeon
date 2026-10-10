@@ -7,7 +7,7 @@ license = "MIT"
 
 [workspace.package]
 # The one version number for the app, CLI and server (release.py bumps it).
-version = "0.2.1"
+version = "0.2.2"
 
 [workspace]
 members = [".", "gui"]

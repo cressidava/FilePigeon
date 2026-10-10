@@ -257,12 +257,32 @@ pub async fn join_invite(app: &App, code: &InviteCode, on_check: &CheckFn) -> Re
         tokio::task::spawn_blocking(move || code.secrets()).await??
     };
     let addr = crate::app::resolve_server(&code.address).await?;
-    // The server's key isn't known yet (and isn't needed: see connect_unpinned).
+    // (A private address is fine: at the inviter's home, split DNS sends the
+    // server's name to its LAN address. The proof below is what matters.)
+    // The server's key isn't known yet. Until the server proves it holds this
+    // invite's key, we use a throwaway identity and reveal nothing.
     let target = RdvTarget { addr, server_key: [0u8; 32], knock_secret: secrets.knock };
     let ep = BoundEndpoint::bind(0, None)?;
-    let rdv = rdv_client::connect_unpinned(&app.identity, &target, &ep).await.map_err(|_| {
+    let rdv = rdv_client::connect_unpinned(&crate::identity::Identity::ephemeral()?, &target, &ep).await.map_err(|_| {
         anyhow!("this invite doesn't work: it was already used, cancelled or expired, or the server can't be reached. Ask for a new one.")
     })?;
+    {
+        let server_pk = crate::tls::peer_public_key(&rdv)?;
+        let mut nonce = [0u8; 16];
+        crate::os_random(&mut nonce);
+        let proof = tokio::time::timeout(
+            Duration::from_secs(10),
+            rdv_client::request(&rdv, &RdvRequest::Prove { nonce: hex::encode(nonce) }),
+        )
+        .await
+        .context("the invite's server didn't answer")??
+        .2;
+        let expected = crate::invites::server_proof(&secrets.knock, &nonce, &server_pk);
+        match proof {
+            RdvResponse::Proof { mac } if hex::decode(&mac).ok().as_deref() == Some(&expected[..]) => {}
+            _ => bail!("the server for this invite couldn't prove it's the right one; not joining"),
+        }
+    }
     let attempt = async {
         let req = RdvRequest::PairJoinSlot { slot: hex::encode(secrets.slot) };
         // If the inviter's PC isn't holding the slot yet (the invite was made a
@@ -303,7 +323,7 @@ pub async fn host_invite(app: &App, ui: &Arc<dyn Ui>, invite: &PendingInvite) ->
     };
     let mut last_error = String::new();
     loop {
-        if !crate::invites::pending(app).iter().any(|p| p.slot == invite.slot) {
+        if !crate::invites::waiting(app).iter().any(|p| p.slot == invite.slot) {
             bail!("the invite for {} was cancelled or expired", invite.friend);
         }
         let ep = BoundEndpoint::bind(0, None)?;
@@ -385,11 +405,29 @@ async fn exchange(
     } else {
         Spake2::<Ed25519Group>::start_b(&pw, &id_a, &id_b)
     };
-    write_msg(send, &PairMsg { data: hex::encode(outbound) }).await?;
-    let inbound: PairMsg = tokio::time::timeout(timeout, read_msg(recv)).await??;
-    let shared = state
-        .finish(&hex::decode(inbound.data)?)
-        .map_err(|e| anyhow!("pairing failed: {e:?}"))?;
+    // Commit, then reveal: the host first sends only a hash of its message,
+    // the joiner answers with its own, then the host reveals. Someone in the
+    // middle therefore can't try message after message until the two sides'
+    // check words happen to match: each side's key is fixed before the other
+    // side's contribution is known.
+    let inbound = if is_host {
+        let commit = blake3::derive_key("filepigeon pairing commitment v1", &outbound);
+        write_msg(send, &PairMsg { data: hex::encode(commit) }).await?;
+        let theirs: PairMsg = tokio::time::timeout(timeout, read_msg(recv)).await??;
+        write_msg(send, &PairMsg { data: hex::encode(&outbound) }).await?;
+        hex::decode(theirs.data)?
+    } else {
+        let commit: PairMsg = tokio::time::timeout(timeout, read_msg(recv)).await??;
+        write_msg(send, &PairMsg { data: hex::encode(&outbound) }).await?;
+        let reveal: PairMsg = tokio::time::timeout(timeout, read_msg(recv)).await??;
+        let reveal = hex::decode(reveal.data)?;
+        let expected = blake3::derive_key("filepigeon pairing commitment v1", &reveal);
+        if hex::decode(commit.data).ok().as_deref() != Some(&expected[..]) {
+            bail!("pairing failed: the other side's messages didn't add up (both PCs need FilePigeon 0.2.2 or newer)");
+        }
+        reveal
+    };
+    let shared = state.finish(&inbound).map_err(|e| anyhow!("pairing failed: {e:?}"))?;
     // Both sides derive the same words only if nobody sits in between.
     let check = crate::invites::check_words(&shared);
 

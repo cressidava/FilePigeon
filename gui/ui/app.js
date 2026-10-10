@@ -443,7 +443,8 @@ async function openPairModal() {
     const text = $("#code", m.el).value.trim();
     if (!text) return;
     // An invite pasted here: hand it to the invite flow (it shows check words).
-    if (looksLikeInvite(text)) { m.close(); openJoin(text); return; }
+    const isInvite = looksLikeInvite(text) || (await invoke("invite_preview", { text }).then(() => true, () => false));
+    if (isInvite) { m.close(); openJoin(text); return; }
     const msg = $("#join-msg", m.el);
     msg.innerHTML = `<span class="spinner"></span> Pairing…`;
     try {
@@ -525,7 +526,12 @@ function viewRequests(root) {
     <p class="lede">Incoming files and requests for your shared folders wait here for your OK, including any that arrived while do not disturb was on.</p>
     ${items.length === 0 ? courierEmpty("No deliveries at the door", `Incoming files and file requests will wait here for your approval${S.dnd === "on" ? "." : " and appear as pop-ups when do not disturb is off."}`) : ""}
     <div class="transfers">${items.map(requestCard).join("")}</div>`;
-  $$("[data-answer]", root).forEach((b) => (b.onclick = async () => {
+  // Buttons arm a second after the list is drawn, so a double click can't
+  // land on the next request when the one above it disappears.
+  const buttons = $$("[data-answer]", root);
+  buttons.forEach((b) => (b.disabled = true));
+  setTimeout(() => buttons.forEach((b) => { if (b.isConnected) b.disabled = false; }), 1000);
+  buttons.forEach((b) => (b.onclick = async () => {
     $$(`[data-id="${b.dataset.id}"]`, root).forEach((x) => (x.disabled = true));
     await call("approval_answer", { id: Number(b.dataset.id), accept: b.dataset.answer === "yes" });
   }));

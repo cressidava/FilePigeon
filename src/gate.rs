@@ -102,11 +102,11 @@ fn verify_knock(key: &[u8; 32], context: &[u8], data: &[u8]) -> Option<[u8; 16]>
 pub trait KnockKeys: Send + Sync + 'static {
     fn keys(&self) -> Arc<Vec<([u8; 32], [u8; 32])>>;
 
-    /// Should knocks also be budgeted per key owner? True when each key
-    /// belongs to one party (a device's peers); false when everyone shares
-    /// one key (the rendezvous server), where a per-owner budget would let one
-    /// sender use up everybody's allowance.
-    fn budget_per_owner(&self) -> bool {
+    /// Should knocks under this owner's key also be budgeted per owner? True
+    /// when the key belongs to one party (a device's peer, a friend's invite);
+    /// false for a key several devices share (the server's owner key), where
+    /// a per-owner budget would let one sender use up everybody's allowance.
+    fn budget_per_owner(&self, _owner: &[u8; 32]) -> bool {
         true
     }
 }
@@ -125,7 +125,7 @@ impl KnockKeys for StaticKey {
         self.0.clone()
     }
 
-    fn budget_per_owner(&self) -> bool {
+    fn budget_per_owner(&self, _owner: &[u8; 32]) -> bool {
         self.0.len() > 1
     }
 }
@@ -245,7 +245,7 @@ impl Gate {
         if !take(Budget::Ip(ip), KNOCKS_PER_IP) {
             return false;
         }
-        !self.keys.budget_per_owner() || take(Budget::Owner(owner), KNOCKS_PER_OWNER)
+        !self.keys.budget_per_owner(&owner) || take(Budget::Owner(owner), KNOCKS_PER_OWNER)
     }
 
     /// Decide whether a datagram may reach the QUIC stack.
@@ -256,6 +256,14 @@ impl Gate {
             if let Some((nonce, owner)) =
                 self.keys.keys().iter().find_map(|(owner, key)| verify_knock(key, &self.context, data).map(|n| (n, *owner)))
             {
+                // A replayed (already used) knock is dropped before it can
+                // spend anyone's budget, so replays can't lock others out.
+                {
+                    let n = self.nonces.lock().unwrap();
+                    if n.previous.contains(&nonce) || n.current.contains(&nonce) {
+                        return false;
+                    }
+                }
                 if !self.within_budget(from.ip(), owner) {
                     return false;
                 }
@@ -420,6 +428,23 @@ mod tests {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+
+    #[test]
+    fn replayed_knocks_spend_no_budget() {
+        // One genuine knock, replayed far beyond any budget from many sources,
+        // must not stop a fresh knock under the same key from getting in.
+        let gate = Gate::new(b"ctx", StaticKey::new([5u8; 32]));
+        let knock = make_knock(&[5u8; 32], b"ctx");
+        assert!(!gate.admit("10.0.0.1:1000".parse().unwrap(), &knock));
+        for i in 0..2000u32 {
+            let from = SocketAddr::from(([10, 1, (i >> 8) as u8, i as u8], 2000));
+            gate.admit(from, &knock);
+        }
+        let fresh = make_knock(&[5u8; 32], b"ctx");
+        let me: SocketAddr = "10.9.9.9:3000".parse().unwrap();
+        gate.admit(me, &fresh);
+        assert!(gate.owner_of(me).is_some());
+    }
 
     #[test]
     fn one_source_cannot_exhaust_the_gate() {

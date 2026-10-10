@@ -59,6 +59,8 @@ pub struct Progress {
     start: Instant,
     finished: AtomicBool,
     cancelled: AtomicBool,
+    /// Every byte is out: from here cancelling would only misreport it.
+    sealed: AtomicBool,
     cancel_notify: tokio::sync::Notify,
     live: Mutex<Live>,
     report_lock: Mutex<()>,
@@ -86,6 +88,7 @@ impl Progress {
             start: now,
             finished: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
+            sealed: AtomicBool::new(false),
             cancel_notify: tokio::sync::Notify::new(),
             live: Mutex::new(Live {
                 phase,
@@ -176,13 +179,24 @@ impl Progress {
     /// Stop it: the connection is closed (the other side is told it was
     /// cancelled) and whatever is waiting on it gives up.
     pub fn cancel(&self) {
-        if self.finished.load(Ordering::SeqCst) || self.cancelled.swap(true, Ordering::SeqCst) {
+        if self.finished.load(Ordering::SeqCst)
+            || self.sealed.load(Ordering::SeqCst)
+            || self.cancelled.swap(true, Ordering::SeqCst)
+        {
             return;
         }
         if let Some(conn) = &self.live.lock().unwrap().conn {
             conn.close(crate::proto::CLOSE_CANCELLED.into(), b"cancelled");
         }
         self.cancel_notify.notify_waiters();
+    }
+
+    /// All the data has been sent: the transfer can no longer be cancelled
+    /// (the other side may already have everything).
+    pub fn seal(&self) {
+        if !self.is_cancelled() {
+            self.sealed.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Report the final state (only the first call counts). A failure after
@@ -250,7 +264,7 @@ impl Progress {
             current_file: live.current_file.clone(),
             rtt_ms,
             loss_pct,
-            cancellable: running,
+            cancellable: running && !self.sealed.load(Ordering::SeqCst),
             state,
         }
     }

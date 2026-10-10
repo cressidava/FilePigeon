@@ -184,14 +184,39 @@ impl Access {
             .map(|i| i.name.clone())
     }
 
+    /// The knock secret behind a gate owner id.
+    pub fn secret_for(&self, label: &[u8; 32]) -> Option<[u8; 32]> {
+        if *label == OWNER_LABEL {
+            return Some(self.owner_secret);
+        }
+        self.file()
+            .invites
+            .iter()
+            .filter_map(Invite::secret_bytes)
+            .find(|s| invite_label(s) == *label)
+    }
+
+    /// Is the key behind this gate owner id a temporary one (an invite
+    /// link's)? Those may only be used to join the inviter's pairing slot.
+    pub fn join_only(&self, label: &[u8; 32]) -> bool {
+        *label != OWNER_LABEL
+            && self
+                .file()
+                .invites
+                .iter()
+                .any(|i| i.expires.is_some() && i.secret_bytes().is_some_and(|s| invite_label(&s) == *label))
+    }
+
     pub fn is_admin(&self, public_key: &[u8; 32]) -> bool {
         let pk = hex::encode(public_key);
         self.file().admins.iter().any(|a| a.eq_ignore_ascii_case(&pk))
     }
 
-    /// Read the current file from disk, change it, save it, and use it.
+    /// Read the current file from disk, change it, save it, and use it. One
+    /// edit at a time, across processes too (the service and the root CLI).
     fn edit<T>(&self, change: impl FnOnce(&mut AccessFile) -> Result<T>) -> Result<T> {
         let _one_at_a_time = self.edits.lock().unwrap();
+        let _locked = self.lock_file()?;
         let mut file = self.read()?;
         let out = change(&mut file)?;
         self.save(&file)?;
@@ -228,16 +253,31 @@ impl Access {
         }
         let now = now();
         let expires = ttl.map(|t| now + t.clamp(60, MAX_INVITE_TTL));
+        let device = device.map(hex::encode);
         self.edit(|f| {
             // Housekeeping: expired temporary invites are dropped for good.
-            f.invites.retain(|i| i.live(now) && !i.name.eq_ignore_ascii_case(&name));
+            f.invites.retain(|i| i.live(now));
+            if let Some(existing) = f.invites.iter().find(|i| i.name.eq_ignore_ascii_case(&name)) {
+                let same_device = existing.device.is_some() && existing.device == device;
+                // Re-giving the same device its key (re-pairing): hand back the
+                // key it already has rather than cutting it off.
+                if same_device && existing.expires.is_none() && expires.is_none() {
+                    if let Some(s) = existing.secret_bytes() {
+                        return Ok(s);
+                    }
+                }
+                // Never silently take over another device's key.
+                if existing.device.is_some() && device.is_some() && !same_device {
+                    bail!("an invite called {:?} already belongs to another device", existing.name);
+                }
+            }
+            f.invites.retain(|i| !i.name.eq_ignore_ascii_case(&name));
             if f.invites.len() >= MAX_INVITES {
                 bail!("too many invites; revoke some first");
             }
-            f.invites.push(Invite { name, secret: hex::encode(secret), created: now, expires, device: device.map(hex::encode) });
-            Ok(())
-        })?;
-        Ok(secret)
+            f.invites.push(Invite { name, secret: hex::encode(secret), created: now, expires, device });
+            Ok(secret)
+        })
     }
 
     /// May `device` use the key behind this gate owner id? The owner key is
@@ -309,32 +349,49 @@ impl Access {
     fn save(&self, file: &AccessFile) -> Result<()> {
         let tmp = self.path.with_extension("access.tmp");
         let _ = std::fs::remove_file(&tmp);
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
         {
             use std::io::Write;
-            let mut f = opts.open(&tmp).with_context(|| format!("cannot write {}", tmp.display()))?;
+            // create_new never follows a symlink planted at this path.
+            let mut f = private_open(&tmp, true)?;
             f.write_all(&serde_json::to_vec_pretty(file)?)?;
             f.sync_all()?;
-        }
-        #[cfg(unix)]
-        {
-            // Only when needed (run as root): the sandboxed service may not
-            // call chown at all, and its own files are already its own.
-            use std::os::unix::fs::MetadataExt;
-            let (want, have) = (std::fs::metadata(&self.like)?, std::fs::metadata(&tmp)?);
-            if (want.uid(), want.gid()) != (have.uid(), have.gid()) {
-                std::os::unix::fs::chown(&tmp, Some(want.uid()), Some(want.gid()))
-                    .with_context(|| format!("cannot hand {} to the service user", tmp.display()))?;
-            }
+            self.hand_over(&f)?;
         }
         std::fs::rename(&tmp, &self.path).with_context(|| format!("cannot replace {}", self.path.display()))?;
         Ok(())
+    }
+
+    /// When run as root (the CLI), give a file we just opened to the user
+    /// that owns the server key, so the sandboxed service can use it. Done on
+    /// the open file itself, so nothing can redirect it through a symlink.
+    /// The service itself never needs to (and may not) change ownership.
+    #[cfg(unix)]
+    fn hand_over(&self, f: &std::fs::File) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let want = std::fs::symlink_metadata(&self.like)?;
+        if want.file_type().is_symlink() {
+            bail!("{} is a symlink; refusing to use it", self.like.display());
+        }
+        let have = f.metadata()?;
+        if (want.uid(), want.gid()) != (have.uid(), have.gid()) {
+            std::os::unix::fs::fchown(f, Some(want.uid()), Some(want.gid()))
+                .context("cannot hand the file to the service user")?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn hand_over(&self, _f: &std::fs::File) -> Result<()> {
+        Ok(())
+    }
+
+    /// An exclusive lock on `<key>.access.lock`, held for one edit.
+    fn lock_file(&self) -> Result<std::fs::File> {
+        let path = self.path.with_extension("access.lock");
+        let f = private_open(&path, false)?;
+        self.hand_over(&f)?;
+        f.lock().with_context(|| format!("cannot lock {}", path.display()))?;
+        Ok(f)
     }
 }
 
@@ -343,6 +400,32 @@ impl KnockKeys for Access {
         self.refresh();
         self.state.lock().unwrap().keys.clone()
     }
+
+    /// The owner key is shared by all the owner's devices: no shared budget
+    /// that one replaying stranger could exhaust. Each invite is one friend's.
+    fn budget_per_owner(&self, owner: &[u8; 32]) -> bool {
+        *owner != OWNER_LABEL
+    }
+}
+
+/// Open a file readable only by its owner, never through a symlink.
+/// `new`: it must not exist yet.
+fn private_open(path: &Path, new: bool) -> Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true).write(true);
+    if new {
+        opts.create_new(true);
+    } else {
+        opts.create(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+        #[cfg(target_os = "linux")]
+        opts.custom_flags(0o400000); // O_NOFOLLOW
+    }
+    opts.open(path).with_context(|| format!("cannot open {}", path.display()))
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -440,6 +523,21 @@ mod tests {
         // The owner key works for any device; unknown keys for none.
         assert!(access.device_allowed(&OWNER_LABEL, &alice).unwrap());
         assert!(!access.device_allowed(&[9u8; 32], &alice).unwrap());
+    }
+
+    #[test]
+    fn link_keys_are_join_only_and_gifts_are_stable() {
+        let key = dir();
+        std::fs::write(&key, b"x").unwrap();
+        let access = Access::open(&key, [7u8; 32]).unwrap();
+        let temp = invite_label(&access.create_invite("link", Some(3600)).unwrap());
+        let friend = invite_label(&access.create_invite("friend", None).unwrap());
+        assert!(access.join_only(&temp) && !access.join_only(&friend) && !access.join_only(&OWNER_LABEL));
+        // Re-gifting the same device returns the same key; another device can't take the name.
+        let a = access.create_invite_for("sam (1234)", None, Some([1; 32])).unwrap();
+        assert_eq!(access.create_invite_for("Sam (1234)", None, Some([1; 32])).unwrap(), a);
+        assert!(access.create_invite_for("sam (1234)", None, Some([2; 32])).is_err());
+        assert!(access.valid_label(&invite_label(&a)));
     }
 
     #[test]
