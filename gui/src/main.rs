@@ -530,6 +530,8 @@ struct Share {
 struct Snapshot {
     configured: bool,
     device_id: Option<String>,
+    /// This PC's public key (not secret): what a server admin adds.
+    public_key: Option<String>,
     settings: Settings,
     peers: Vec<Peer>,
     shares: Vec<Share>,
@@ -552,11 +554,9 @@ fn get_state(window: WebviewWindow, state: State<'_, Arc<GuiState>>) -> CmdResul
     let configured = paths.config().exists();
     let cfg: Config = load_json(&paths.config()).map_err(err)?;
     let has_server_key = cfg.has_server_key();
-    let device_id = paths
-        .identity()
-        .exists()
-        .then(|| Identity::load_or_create(&paths.identity()).ok().map(|i| i.device_id()))
-        .flatten();
+    let identity = paths.identity().exists().then(|| Identity::load_or_create(&paths.identity()).ok()).flatten();
+    let device_id = identity.as_ref().map(|i| i.device_id());
+    let public_key = identity.as_ref().map(|i| hex::encode(i.public_key()));
     let peers: Vec<Peer> = load_json(&paths.peers()).map_err(err)?;
     let shares: filepigeon::config::Shares = load_json(&paths.shares()).map_err(err)?;
     let mut transfers: Vec<_> = state.ui.transfers.lock().unwrap().values().cloned().collect();
@@ -564,6 +564,7 @@ fn get_state(window: WebviewWindow, state: State<'_, Arc<GuiState>>) -> CmdResul
     Ok(Snapshot {
         configured,
         device_id,
+        public_key,
         settings: Settings {
             device_name: cfg.device_name,
             rendezvous: cfg.rendezvous,

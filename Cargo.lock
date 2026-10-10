@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "filepigeon"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1476,11 +1476,12 @@ dependencies = [
 
 [[package]]
 name = "filepigeon-gui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "directories",
  "filepigeon",
+ "hex",
  "serde",
  "serde_json",
  "tauri",

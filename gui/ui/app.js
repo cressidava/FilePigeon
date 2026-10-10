@@ -691,6 +691,8 @@ function viewSettings(root) {
       <h2>This PC</h2>
       <label class="field"><span>Device name</span><input type="text" name="device_name" maxlength="64" value="${esc(s.device_name)}"><small>Shown to devices you pair with.</small></label>
       ${S.snap.device_id ? `<label class="field"><span>Device id</span><div class="mono">${esc(S.snap.device_id)}</div></label>` : ""}
+      ${S.snap.public_key ? `<div class="field"><span>Public key</span><div class="row"><div class="mono selectable" style="word-break:break-all;flex:1">${esc(S.snap.public_key)}</div><button type="button" class="btn small" id="copy-pk">Copy</button></div>
+        <small>Not a secret. A server owner adds this to make this PC an admin (pigeon-rendezvous --add-admin).</small></div>` : ""}
       <hr><h2>Rendezvous server <span class="muted" style="font-weight:400">(optional)</span></h2>
       <p class="muted" style="margin:-6px 0 12px">Leave empty to share only on your local network. Needed to reach devices over the internet. <strong>Invited by someone?</strong> Leave this empty: pasting their invite under Devices → Pair a device sets it up for you.</p>
       <label class="field"><span>Address</span><input type="text" name="rendezvous" placeholder="pigeon.example.com:7400" value="${esc(s.rendezvous)}"></label>
@@ -729,6 +731,7 @@ function viewSettings(root) {
     </form>`;
   wireBanner(root);
   $("#first-join", root)?.addEventListener("click", () => openJoin());
+  $("#copy-pk", root)?.addEventListener("click", () => navigator.clipboard.writeText(S.snap.public_key).then(() => toast("ok", "Public key copied.")));
   wireUpdateBox(root);
   const form = $("#form", root);
   $("#pick-dl", root).onclick = async () => {
