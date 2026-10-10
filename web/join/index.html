@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>You're invited to FilePigeon</title>
+  <link rel="icon" href="/pigeon-mark.png" type="image/png">
+  <link rel="stylesheet" href="/join.css">
+</head>
+<body>
+  <main>
+    <header><img src="/pigeon-mark.png" alt=""><span>FilePigeon</span></header>
+
+    <div id="invite" hidden>
+      <h1>You're invited to FilePigeon</h1>
+      <p class="lede">Send files straight between your PCs, encrypted end to end. No accounts, no cloud storage.</p>
+
+      <ol class="steps">
+        <li>
+          <h2>Get FilePigeon <span class="muted">(Windows)</span></h2>
+          <p>Already have it? Skip to step 2.</p>
+          <a class="btn" id="download" href="/FilePigeon-setup.exe" download>Download FilePigeon</a>
+          <p class="note">Windows may warn about an unrecognised app, because it's not code-signed yet. Click <b>More info</b>, then <b>Run anyway</b>. It installs just for you; no admin rights needed.</p>
+        </li>
+        <li>
+          <h2>Open your invite</h2>
+          <p>Opens FilePigeon with the invite filled in. If your browser asks to open FilePigeon, allow it.</p>
+          <a class="btn primary" id="open" href="#">Open invite in FilePigeon</a>
+        </li>
+        <li>
+          <h2>Compare the check words</h2>
+          <p>FilePigeon shows three check words. Your friend sees the same three; once they accept, you're connected.</p>
+        </li>
+      </ol>
+
+      <details>
+        <summary>The button didn't open FilePigeon?</summary>
+        <p>Open FilePigeon, click <b>I have an invite</b>, and enter:</p>
+        <div class="code"><span id="code"></span><button id="copy" type="button">Copy</button></div>
+      </details>
+
+      <p class="fine">This invite works once, within 24 hours of being sent. It never leaves your PC except to connect you to your friend: this page doesn't send it anywhere.</p>
+    </div>
+
+    <div id="broken" hidden>
+      <h1>This invite link is incomplete</h1>
+      <p class="lede">Part of the link may have been cut off. Ask the person who invited you to send it again, or copy the whole link into your browser.</p>
+      <p><a class="btn" href="/FilePigeon-setup.exe" download>Download FilePigeon anyway</a></p>
+    </div>
+  </main>
+  <script src="/join.js"></script>
+</body>
+</html>

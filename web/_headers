@@ -1,0 +1,13 @@
+# Cloudflare Pages response headers. The invite lives in the URL fragment
+# (never sent to the server); these keep it from leaking any other way.
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()
+  Cross-Origin-Opener-Policy: same-origin
+
+/FilePigeon-setup.exe
+  Content-Disposition: attachment; filename="FilePigeon-setup.exe"
+  Cache-Control: no-cache

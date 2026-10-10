@@ -1,0 +1,81 @@
+# FilePigeon rendezvous server, sandboxed so that even if it were compromised it
+# couldn't touch anything else on this machine.
+#
+# Install:
+#   sudo install -m 755 target/release/pigeon-rendezvous /usr/local/bin/
+#   sudo cp deploy/pigeon-rendezvous.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pigeon-rendezvous
+#   # The owner key for your own devices (never written to the log):
+#   sudo pigeon-rendezvous --show-key --key /var/lib/private/pigeon-rendezvous/rendezvous-key.pem
+#   # Friends get their own keys: --invite NAME / --invites / --revoke NAME
+#   # (or from an admin device: --add-admin PUBLIC_KEY, then `filepigeon pair --give-server`)
+
+[Unit]
+Description=FilePigeon rendezvous server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Stealth is on by default. Fewer relay ports = fewer sessions, smaller surface.
+ExecStart=/usr/local/bin/pigeon-rendezvous --listen 0.0.0.0:7400 --key ${STATE_DIRECTORY}/rendezvous-key.pem --relay-ports 7401-7404
+Restart=on-failure
+RestartSec=5
+
+# Runs as a throwaway user created on start; it owns only its state directory
+# (/var/lib/pigeon-rendezvous: the identity key, the knock secret, and the
+# access file with friends' keys and admin devices).
+DynamicUser=yes
+StateDirectory=pigeon-rendezvous
+UMask=0077
+
+# No privileges, no capabilities, no way to gain any.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+
+# Can't see or modify the rest of the system.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+
+# Only ordinary network sockets and ordinary system calls.
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# A blocked call fails with "permission denied" instead of killing the server.
+SystemCallErrorNumber=EPERM
+
+# Resource caps: a flood can't starve your other services.
+MemoryMax=256M
+TasksMax=64
+CPUQuota=50%
+
+# A restart briefly leaves UDP 7400 unbound, and the kernel answers probes with
+# "port unreachable" during that gap. For complete silence, have the host
+# firewall drop (not reject) traffic to these ports when nothing is listening.
+#
+# Optional: forbid it from talking to your private network at all, so a
+# compromised server couldn't reach your other machines. Only enable this if
+# your own devices reach the server through its public address (not its LAN IP).
+#IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 fc00::/7 fe80::/10
+
+[Install]
+WantedBy=multi-user.target

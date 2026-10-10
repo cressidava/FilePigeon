@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FilePigeon: incoming request</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="approve">
+  <div class="ap-brand"><img src="pigeon-mark.png" alt=""><span>FilePigeon</span><span class="ap-label">Delivery request</span></div>
+  <div class="ap-head">
+    <div class="icon" id="icon"></div>
+    <div><h1 id="title">Loading…</h1><p id="subtitle"></p></div>
+  </div>
+  <div class="ap-files" id="files"></div>
+  <div class="ap-timer"><i id="timer" style="width:100%"></i></div>
+  <div class="ap-foot">
+    <span class="muted" id="countdown"></span>
+    <button class="btn" id="deny" autofocus>Deny</button>
+    <button class="btn primary" id="accept">Accept</button>
+  </div>
+  <script src="approve.js"></script>
+</body>
+</html>

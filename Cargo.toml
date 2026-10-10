@@ -1,0 +1,57 @@
+[package]
+name = "filepigeon"
+version = "0.1.0"
+edition = "2021"
+description = "Secure, direct PC-to-PC file transfer with pairing, accept/deny prompts and shared folders"
+license = "MIT"
+
+[workspace]
+members = [".", "gui"]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "filepigeon"
+path = "src/bin/filepigeon.rs"
+
+[[bin]]
+name = "pigeon-rendezvous"
+path = "src/bin/pigeon-rendezvous.rs"
+
+[dependencies]
+argon2 = "0.5"
+base64 = "0.22"
+anyhow = "1"
+blake3 = "1"
+chacha20poly1305 = "0.11"
+clap = { version = "4", features = ["derive"] }
+curve25519-dalek = "5"
+directories = "6"
+hex = "0.4"
+igd-next = { version = "0.18", features = ["aio_tokio"] }
+mainline = "8.0.1"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rand = "0.10"
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+socket2 = "0.6"
+spake2 = "0.4"
+tokio = { version = "1", features = ["full"] }
+x509-parser = "0.18"
+
+# Invite codes run Argon2; keep it fast in debug builds and tests too.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

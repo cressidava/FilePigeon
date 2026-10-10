@@ -1,0 +1,9 @@
+/target
+/gui/gen
+/web/FilePigeon-setup.exe
+
+# Secrets: never commit server or device keys.
+*.pem
+*.knock
+*.access
+rendezvous-key*

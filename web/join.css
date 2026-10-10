@@ -1,0 +1,30 @@
+:root {
+  --bg: #1d2426; --panel: #263033; --border: #3a4649; --text: #e9e4da; --muted: #a8a49b;
+  --accent: #e9a07e; --accent-ink: #2a1a12; --soft: rgba(233, 160, 126, 0.12);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f6f1e8; --panel: #fffaf2; --border: #e2d8c8; --text: #2b2622; --muted: #6d655c; --accent: #c4643f; --accent-ink: #fff; --soft: rgba(196, 100, 63, 0.1); color-scheme: light; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 "Segoe UI", system-ui, -apple-system, sans-serif; }
+main { max-width: 620px; margin: 0 auto; padding: 28px 16px 48px; }
+header { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; margin-bottom: 28px; }
+header img { width: 36px; height: 36px; border-radius: 8px; }
+h1 { font-size: 30px; line-height: 1.2; margin: 0 0 8px; }
+h2 { font-size: 18px; margin: 0 0 4px; }
+.lede { color: var(--muted); margin: 0 0 24px; }
+.muted { color: var(--muted); font-weight: 400; }
+.steps { list-style: none; padding: 0; margin: 0 0 20px; counter-reset: step; display: grid; gap: 14px; }
+.steps li { counter-increment: step; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 18px 18px 62px; position: relative; }
+.steps li::before { content: counter(step); position: absolute; left: 18px; top: 18px; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--soft); color: var(--accent); font-weight: 700; }
+.steps p { margin: 0 0 12px; color: var(--muted); }
+.btn { display: inline-block; padding: 10px 18px; border-radius: 10px; border: 1px solid var(--border); color: var(--text); text-decoration: none; font-weight: 600; background: transparent; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn:hover { filter: brightness(1.08); }
+.note { font-size: 13.5px; margin: 12px 0 0 !important; }
+details { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; margin-bottom: 18px; }
+summary { cursor: pointer; font-weight: 600; }
+.code { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; font: 600 15px/1.4 Consolas, ui-monospace, monospace; background: var(--soft); color: var(--accent); padding: 12px 14px; border-radius: 10px; word-break: break-all; }
+.code button { font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
+.fine { font-size: 13px; color: var(--muted); }
