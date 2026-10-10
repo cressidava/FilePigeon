@@ -172,9 +172,9 @@ To release:
 python scripts/release.py 0.2.2 "What changed"
 ```
 
-It sets the version (one `[workspace.package]` version for everything), builds the signed installer, and stages `web/FilePigeon-setup.exe`, `web/update/` and `web/update/latest.json`. Then upload the `web` folder as a new Cloudflare deployment.
+It sets the version (one `[workspace.package]` version for everything), builds the installer, signs it in a separate step, and stages `web/FilePigeon-setup.exe`, `web/update/` and `web/update/latest.json`. Then upload the `web` folder as a new Cloudflare deployment.
 
-The signing key lives outside the repo at `%USERPROFILE%\.filepigeon-release\updater.key` (its public half is in `gui/tauri.conf.json`). Back it up somewhere safe. If it's lost, installed copies can't accept new updates and everyone reinstalls once; if it leaks, someone could sign updates (they'd also need your invite site to deliver them).
+The signing key is password-protected and lives outside the repo, in `%USERPROFILE%\.filepigeon-release\updater-v2.key`; its password is stored encrypted for your Windows account (DPAPI), so neither file alone can sign anything, and the key never enters the build environment (`scripts/signing.py`). Back up the key file **and** its password: run `python scripts/signing.py show-password` in your own terminal and keep both in a password manager. If they're lost, installed copies can't accept new updates and everyone reinstalls once.
 
 ### Invite page on Cloudflare Pages
 
