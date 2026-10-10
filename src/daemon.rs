@@ -352,9 +352,32 @@ async fn rendezvous_loop(ctx: Arc<Ctx>) {
     }
 }
 
+/// How a connection reached us, for the transfer card: through our server's
+/// relay, over the local network, or directly over the internet.
+async fn route_label(ctx: &Ctx, remote: SocketAddr) -> &'static str {
+    let server = ctx.app.rendezvous().await.ok().map(|t| t.addr.ip());
+    if server == Some(remote.ip()) {
+        "Relay"
+    } else if crate::netutil::is_private(remote.ip()) {
+        "Local network"
+    } else {
+        "Direct"
+    }
+}
+
+/// How a transfer that stopped with `e` ended: cancelled by the other side
+/// ("Joe cancelled the transfer"), or failed with the error in words.
+pub fn failure_state(e: &anyhow::Error, peer: &str) -> TransferState {
+    if close_code(e) == Some(crate::proto::CLOSE_CANCELLED) {
+        TransferState::Cancelled { message: format!("{} cancelled the transfer", display_safe(peer, 64)) }
+    } else {
+        TransferState::Failed { message: display_safe(&format!("{e:#}"), 300) }
+    }
+}
+
 /// The application close code behind an error, however it surfaced: the
 /// connection itself, or a stream read/write that it cut short.
-fn close_code(e: &anyhow::Error) -> Option<u32> {
+pub fn close_code(e: &anyhow::Error) -> Option<u32> {
     fn code(ce: &quinn::ConnectionError) -> Option<u32> {
         match ce {
             quinn::ConnectionError::ApplicationClosed(c) => u32::try_from(c.error_code.into_inner()).ok(),
@@ -551,9 +574,14 @@ async fn handle_connection(ctx: &Arc<Ctx>, incoming: quinn::Incoming) -> Result<
     let _ = hello.finish();
     ctx.ports.session_started().await;
     while let Ok((send, recv)) = conn.accept_bi().await {
-        let ctx = ctx.clone();
+        let (ctx, conn) = (ctx.clone(), conn.clone());
         tokio::spawn(async move {
-            if let Err(e) = handle_request(&ctx, key, send, recv).await {
+            // A cancelled transfer is already shown on its card.
+            let result = handle_request(&ctx, &conn, key, send, recv).await;
+            if let Err(e) = result.or_else(|e| match close_code(&e) {
+                Some(crate::proto::CLOSE_CANCELLED) => Ok(()),
+                _ => Err(e),
+            }) {
                 let who = ctx.app.peer_by_key(&key).ok().flatten().map(|p| p.name).unwrap_or_else(|| "peer".into());
                 ctx.ui.log(format!("[{who}] {}", display_safe(&format!("{e:#}"), 300)));
             }
@@ -580,6 +608,7 @@ async fn deny(send: &mut quinn::SendStream, reason: &str) -> Result<()> {
 
 async fn handle_request(
     ctx: &Ctx,
+    conn: &quinn::Connection,
     key: [u8; 32],
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
@@ -614,7 +643,11 @@ async fn handle_request(
                     return deny(&mut send, "too many requests waiting; try again later").await;
                 };
                 let approval = Approval::new(&peer.name, &peer.device_id, ApprovalKind::Offer, None, &files, timeout);
-                let answer = ctx.ui.ask(approval).await;
+                // If they give up (cancel) while we're deciding, the prompt goes away.
+                let answer = tokio::select! {
+                    a = ctx.ui.ask(approval) => a,
+                    _ = conn.closed() => false,
+                };
                 drop(slot);
                 answer
             };
@@ -627,6 +660,8 @@ async fn handle_request(
             let offsets = tokio::task::spawn_blocking(move || resume_offsets(&d, &id, &f)).await?;
             write_msg(&mut send, &PeerResponse::Accepted { offsets: offsets.clone() }).await?;
             let progress = Progress::start(ctx.ui.clone(), &peer.name, Direction::Receive, transfer_name(&files), total);
+            progress.set_route(route_label(ctx, conn.remote_address()).await);
+            progress.attach(conn);
             match recv_files(&mut recv, &dest, &peer.device_id, &files, &offsets, &progress, &claims).await {
                 Ok(complete) => {
                     let message = complete_message(&complete, "Received");
@@ -640,7 +675,7 @@ async fn handle_request(
                     ctx.ui.log(format!("{message} from {} into {}", peer.name, dest.display()));
                 }
                 Err(e) => {
-                    progress.finish(TransferState::Failed { message: display_safe(&format!("{e:#}"), 300) });
+                    progress.finish(failure_state(&e, &peer.name));
                     return Err(e);
                 }
             }
@@ -686,7 +721,11 @@ async fn handle_request(
             let metas: Vec<_> = files.iter().map(|f| f.meta.clone()).collect();
             let approval =
                 Approval::new(&peer.name, &peer.device_id, ApprovalKind::Fetch, Some(path.clone()), &metas, timeout);
-            let approved = peer.auto_accept || ctx.ui.ask(approval).await;
+            let approved = peer.auto_accept
+                || tokio::select! {
+                    a = ctx.ui.ask(approval) => a,
+                    _ = conn.closed() => false,
+                };
             drop(slot);
             let still_allowed = current_peer(ctx, &key).is_some_and(|p| p.allow_browse);
             if !approved || !still_allowed {
@@ -703,6 +742,8 @@ async fn handle_request(
             };
             let progress =
                 Progress::start(ctx.ui.clone(), &peer.name, Direction::Send, transfer_name(&metas), total_size(&metas));
+            progress.set_route(route_label(ctx, conn.remote_address()).await);
+            progress.attach(conn);
             let result = async {
                 send_files(&mut send, &files, &offsets, &progress).await?;
                 anyhow::Ok(read_msg::<_, Complete>(&mut recv).await?)
@@ -715,7 +756,7 @@ async fn handle_request(
                     ctx.ui.log(format!("{message} to {} from your shares", peer.name));
                 }
                 Err(e) => {
-                    progress.finish(TransferState::Failed { message: display_safe(&format!("{e:#}"), 300) });
+                    progress.finish(failure_state(&e, &peer.name));
                     return Err(e);
                 }
             }

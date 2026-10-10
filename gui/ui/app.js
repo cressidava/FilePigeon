@@ -573,17 +573,47 @@ function viewTransfers(root) {
   $("#go-devices", root)?.addEventListener("click", () => setView("devices"));
 }
 
+const duration = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`);
+
 function transferCard(t) {
+  const running = t.state === "running";
   const pct = t.total ? Math.min(100, (t.done * 100) / t.total) : 100;
-  const label = { running: "In flight", done: "Delivered", failed: "Failed" }[t.state];
-  const extra = t.state === "running" ? `${human(t.bytes_per_sec)}/s` : esc(t.message || "");
+  const phase = running ? t.phase : t.state;
+  const label = {
+    connecting: "Connecting", waiting: "Waiting", transferring: "In flight",
+    done: t.direction === "send" ? "Delivered" : "Received", failed: "Failed", cancelled: "Cancelled",
+  }[phase];
+  const who = `${t.direction === "send" ? "to" : "from"} <bdi>${esc(t.peer)}</bdi>`;
+  let meta;
+  if (running && t.phase === "connecting") meta = `<span><span class="spinner"></span> Connecting to <bdi>${esc(t.peer)}</bdi>…</span>`;
+  else if (running && t.phase === "waiting") meta = `<span><span class="spinner"></span> Waiting for <bdi>${esc(t.peer)}</bdi> to accept…</span>`;
+  else if (running) meta = `<span>${who}</span><span>${human(t.done)} / ${human(t.total)}</span><span>${human(t.bytes_per_sec)}/s</span>${t.eta_secs != null ? `<span>${duration(t.eta_secs)} left</span>` : ""}`;
+  else meta = `<span>${who}</span><span>${esc(t.message || "")}</span>`;
+  const details = [];
+  if (running && t.phase === "transferring" && t.file_count > 1) details.push(`File ${t.file_index} of ${t.file_count}: <bdi>${esc(t.current_file)}</bdi>`);
+  if (t.avg_bytes_per_sec) details.push(`Avg ${human(t.avg_bytes_per_sec)}/s`);
+  if (t.elapsed_secs && (!running || t.phase === "transferring")) details.push(`${duration(t.elapsed_secs)} ${running ? "elapsed" : "total"}`);
+  if (t.rtt_ms != null && running) details.push(`${t.rtt_ms} ms${t.loss_pct != null ? ` · ${t.loss_pct.toFixed(1)}% loss` : ""}`);
+  const route = t.route ? `<span class="route ${t.route === "Relay" ? "relay" : ""}" title="${t.route === "Relay" ? "Through your rendezvous server's relay: still end-to-end encrypted, but often slower than a direct connection" : "A direct, end-to-end encrypted connection between the two PCs"}">${esc(t.route)}</span>` : "";
   return `<div class="card transfer ${t.state}" id="t-${t.id}">
     <div class="dir">${t.direction === "send" ? ICON.up : ICON.down}</div>
-    <div class="title">${esc(t.name)}</div><span class="pill ${t.state}">${label}</span>
-    <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
-    <div class="meta"><span>${t.direction === "send" ? "to" : "from"} ${esc(t.peer)}</span>
-      <span>${human(t.done)} / ${human(t.total)}</span><span>${extra}</span></div></div>`;
+    <div class="title">${esc(t.name)}</div>
+    <div class="right">${route}<span class="pill ${running ? "running" : t.state}">${label}</span>
+      ${t.cancellable ? `<button class="btn ghost small danger" data-cancel-transfer="${t.id}">Cancel</button>` : ""}</div>
+    <div class="bar ${running && t.phase !== "transferring" ? "idle" : ""}"><i style="width:${pct.toFixed(1)}%"></i></div>
+    <div class="meta">${meta}</div>
+    ${details.length ? `<div class="details">${details.join("<span class=\"dot\">·</span>")}</div>` : ""}</div>`;
 }
+
+// Cancel buttons (cards are redrawn often, so one listener for all of them).
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest?.("[data-cancel-transfer]");
+  if (!b) return;
+  const id = Number(b.dataset.cancelTransfer);
+  const t = S.transfers.get(id);
+  if (!(await confirmModal("Cancel this transfer?", `${t ? t.name : "This transfer"} will stop${t && t.direction === "receive" ? ". What has arrived so far is kept, so it can resume if they send it again." : "."}`, "Cancel transfer", true))) return;
+  try { await invoke("transfer_cancel", { id }); } catch (err) { toast("warn", String(err)); }
+});
 
 // ---------- Shares ----------
 function viewShares(root) {

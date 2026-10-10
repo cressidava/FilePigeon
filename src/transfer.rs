@@ -261,7 +261,8 @@ pub async fn send_files(
         bail!("peer sent the wrong number of resume offsets");
     }
     let mut buf = vec![0u8; CHUNK];
-    for (f, &offset) in files.iter().zip(offsets) {
+    for (i, (f, &offset)) in files.iter().zip(offsets).enumerate() {
+        progress.set_file(i + 1, files.len(), &f.meta.path);
         recheck_containment(f)?;
         let offset = offset.min(f.meta.size);
         let mut file = tokio::fs::File::open(&f.local)
@@ -287,6 +288,9 @@ pub async fn send_files(
             if n == 0 {
                 bail!("{} changed during transfer", f.local.display());
             }
+            if progress.is_cancelled() {
+                bail!("cancelled");
+            }
             send.write_all(&buf[..n]).await?;
             hasher.update(&buf[..n]);
             progress.add(n as u64);
@@ -311,7 +315,8 @@ pub async fn recv_files(
     let mut received = 0;
     let mut failed = Vec::new();
 
-    for (meta, &offset) in metas.iter().zip(offsets) {
+    for (i, (meta, &offset)) in metas.iter().zip(offsets).enumerate() {
+        progress.set_file(i + 1, metas.len(), &meta.path);
         let rel = sanitize_rel(&meta.path)?;
         let part = partial_path(dest, peer_id, meta);
         // Never resume from (or write through) anything but an ordinary file
@@ -351,6 +356,9 @@ pub async fn recv_files(
                 .context("sender stopped mid-file (progress kept; run it again to resume)")?;
             hasher.update(&buf[..n]);
             file.write_all(&buf[..n]).await?;
+            if progress.is_cancelled() {
+                bail!("cancelled");
+            }
             progress.add(n as u64);
             left -= n as u64;
         }

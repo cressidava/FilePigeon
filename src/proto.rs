@@ -9,6 +9,8 @@ pub const CLOSE_REPLACED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
 /// Connection close code: that key is locked to a different device.
 pub const CLOSE_WRONG_DEVICE: u32 = 4;
+/// Connection close code (between devices): the user cancelled the transfer.
+pub const CLOSE_CANCELLED: u32 = 5;
 
 /// Sent by a device on a stream it opens to the rendezvous server.
 #[derive(Debug, Serialize, Deserialize)]

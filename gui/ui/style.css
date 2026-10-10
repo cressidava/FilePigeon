@@ -219,6 +219,14 @@ label.field small { display: block; color: var(--muted); margin-top: 4px; }
 /* ---------- transfers ---------- */
 .transfers { display: flex; flex-direction: column; gap: 10px; }
 .transfer { padding: 14px 16px; display: grid; grid-template-columns: 36px 1fr auto; gap: 4px 12px; align-items: center; }
+.transfer .right { display: flex; align-items: center; gap: 8px; }
+.transfer .details { grid-column: 2 / 4; font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; }
+.transfer .details .dot { opacity: .5; }
+.transfer .bar.idle i { width: 30% !important; animation: fp-slide 1.4s ease-in-out infinite; opacity: .55; }
+@keyframes fp-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.route { font-size: 11.5px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.route.relay { border-color: var(--accent); color: var(--accent); }
+.pill.cancelled { background: var(--panel-2); color: var(--muted); }
 .transfer .dir { grid-row: span 2; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
 .transfer .dir svg { width: 18px; height: 18px; }
 .transfer .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

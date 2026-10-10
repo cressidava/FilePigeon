@@ -5,6 +5,14 @@ use std::time::Duration;
 
 /// The LAN address the OS would use for internet traffic. No packet is sent:
 /// "connecting" a UDP socket only picks a route.
+/// An address on a local network (not reachable from the internet).
+pub fn is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00 || (v6.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
 pub fn primary_local_ip() -> Option<IpAddr> {
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:80").ok()?;
@@ -37,6 +45,11 @@ impl BoundEndpoint {
         gate: Option<Arc<crate::gate::Gate>>,
     ) -> Result<Self> {
         let sock = UdpSocket::bind(("0.0.0.0", port))?;
+        // The OS defaults (64 KiB on Windows) drop packets at transfer speeds,
+        // which makes QUIC back off. Best effort: the OS may cap these.
+        let tuning = socket2::SockRef::from(&sock);
+        let _ = tuning.set_recv_buffer_size(4 << 20);
+        let _ = tuning.set_send_buffer_size(4 << 20);
         let punch = sock.try_clone()?;
         let runtime: Arc<dyn quinn::Runtime> = Arc::new(quinn::TokioRuntime);
         let raw = runtime.wrap_udp_socket(sock)?;

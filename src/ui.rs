@@ -83,6 +83,7 @@ pub enum TransferState {
     Running,
     Done { message: String },
     Failed { message: String },
+    Cancelled { message: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,7 +94,23 @@ pub struct TransferUpdate {
     pub name: String,
     pub total: u64,
     pub done: u64,
+    /// Current speed while running (last few seconds); the average once ended.
     pub bytes_per_sec: u64,
+    pub avg_bytes_per_sec: u64,
+    pub elapsed_secs: u64,
+    pub eta_secs: Option<u64>,
+    /// "connecting", "waiting" (for the other side to accept) or "transferring".
+    pub phase: String,
+    /// "Local network", "Direct" or "Relay", once known.
+    pub route: Option<String>,
+    /// Which file is moving (1-based), of how many.
+    pub file_index: usize,
+    pub file_count: usize,
+    pub current_file: String,
+    /// Connection quality: round-trip time and packet loss.
+    pub rtt_ms: Option<u64>,
+    pub loss_pct: Option<f32>,
+    pub cancellable: bool,
     #[serde(flatten)]
     pub state: TransferState,
 }
@@ -185,9 +202,16 @@ impl Ui for TerminalUi {
             Direction::Send => "to",
             Direction::Receive => "from",
         };
+        let peer = crate::text::display_safe(&u.peer, 64);
+        if matches!(u.state, TransferState::Running) && u.phase != "transferring" {
+            let doing = if u.phase == "connecting" { format!("connecting to {peer}") } else { format!("waiting for {peer} to accept") };
+            print!("\r{doing}...                                        ");
+            let _ = std::io::stdout().flush();
+            return;
+        }
         print!(
             "\r{arrow} {}: {:5.1}%  {} / {}  {}/s     ",
-            crate::text::display_safe(&u.peer, 64),
+            peer,
             pct,
             human(u.done),
             human(u.total),
@@ -199,6 +223,7 @@ impl Ui for TerminalUi {
             TransferState::Failed { message } => {
                 println!("\n  failed: {}", crate::text::display_safe(&message, 300))
             }
+            TransferState::Cancelled { message } => println!("\n  {}", crate::text::display_safe(&message, 300)),
         }
         let _ = std::io::stdout().flush();
     }

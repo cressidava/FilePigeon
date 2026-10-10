@@ -29,6 +29,9 @@ struct Book {
     /// This PC's last listening port (used when `listen_port` is 0).
     #[serde(default)]
     own_port: Option<u16>,
+    /// When we last had to use the relay for each device (direct failed).
+    #[serde(default)]
+    relayed: HashMap<String, u64>,
 }
 
 fn now() -> u64 {
@@ -83,6 +86,25 @@ pub fn failed(app: &App, device_id: &str, addrs: &[SocketAddr]) {
 pub fn forget(app: &App, device_id: &str) {
     let mut book = load(app);
     if book.peers.remove(device_id).is_some() {
+        save(app, &book);
+    }
+}
+
+/// Did reaching this device need the relay in the last day? Then the
+/// direct attempt gets a shorter chance, so connecting doesn't drag.
+pub fn relayed_recently(app: &App, device_id: &str) -> bool {
+    load(app).relayed.get(device_id).is_some_and(|t| now().saturating_sub(*t) < 24 * 3600)
+}
+
+pub fn note_route(app: &App, device_id: &str, relayed: bool) {
+    let mut book = load(app);
+    let changed = if relayed {
+        book.relayed.insert(device_id.to_string(), now());
+        true
+    } else {
+        book.relayed.remove(device_id).is_some()
+    };
+    if changed {
         save(app, &book);
     }
 }

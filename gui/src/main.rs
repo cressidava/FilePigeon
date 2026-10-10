@@ -310,20 +310,10 @@ impl Ui for GuiUi {
 
         let handle = self.handle.clone();
         Box::pin(async move {
+            // Runs however this ends: answered, timed out, or abandoned
+            // because the other side gave up (the pop-up must not linger).
+            let _cleanup = ApprovalCleanup { handle: handle.clone(), id };
             let answer = tokio::time::timeout(Duration::from_secs(timeout), rx).await;
-            let ui = handle.state::<Arc<GuiState>>().ui.clone();
-            ui.pending.lock().unwrap().remove(&id);
-            if let Some(w) = handle.get_webview_window(&format!("approve-{id}")) {
-                let _ = w.destroy();
-            }
-            {
-                let mut open = ui.open_window.lock().unwrap();
-                if *open == Some(id) {
-                    *open = None;
-                }
-            }
-            ui.show_next();
-            ui.approvals_changed();
             matches!(answer, Ok(Ok(true)))
         })
     }
@@ -341,9 +331,11 @@ impl Ui for GuiUi {
     }
 
     fn transfer(&self, update: TransferUpdate) {
-        if let TransferState::Done { message } | TransferState::Failed { message } = &update.state {
-            let failed = matches!(update.state, TransferState::Failed { .. });
-            self.toast(if failed { "error" } else { "ok" }, format!("{}: {} ({message})", update.peer, update.name));
+        match &update.state {
+            TransferState::Done { message } => self.toast("ok", format!("{}: {} ({message})", update.peer, update.name)),
+            TransferState::Failed { message } => self.toast("error", format!("{}: {} ({message})", update.peer, update.name)),
+            TransferState::Cancelled { .. } => self.toast("warn", format!("Cancelled: {}", update.name)),
+            TransferState::Running => {}
         }
         self.transfers.lock().unwrap().insert(update.id, update.clone());
         let _ = self.handle.emit("transfer", update);
@@ -373,11 +365,37 @@ struct Service {
     task: Option<JoinHandle<()>>,
 }
 
+/// Removes a finished (or abandoned) request and its pop-up.
+struct ApprovalCleanup {
+    handle: AppHandle,
+    id: u64,
+}
+
+impl Drop for ApprovalCleanup {
+    fn drop(&mut self) {
+        let ui = self.handle.state::<Arc<GuiState>>().ui.clone();
+        ui.pending.lock().unwrap().remove(&self.id);
+        if let Some(w) = self.handle.get_webview_window(&format!("approve-{}", self.id)) {
+            let _ = w.destroy();
+        }
+        {
+            let mut open = ui.open_window.lock().unwrap();
+            if *open == Some(self.id) {
+                *open = None;
+            }
+        }
+        ui.show_next();
+        ui.approvals_changed();
+    }
+}
+
 struct GuiState {
     ui: Arc<GuiUi>,
     service: Mutex<Service>,
     status: Mutex<ServiceStatus>,
     pairing: Mutex<Option<JoinHandle<()>>>,
+    /// Sends in progress (peer + files), so one can't be started twice.
+    sending: Mutex<std::collections::HashSet<String>>,
     /// An invite link FilePigeon was opened with, until the window asks for it.
     invite_link: Mutex<Option<String>>,
     /// Tray "Do not disturb" check items, kept in sync with the mode.
@@ -991,20 +1009,36 @@ fn share_remove(window: WebviewWindow, name: String) -> CmdResult<()> {
 fn spawn_send(state: &Arc<GuiState>, peer: String, paths: Vec<PathBuf>) -> CmdResult<()> {
     let app = App::load().map_err(err)?;
     let ui = state.ui.clone();
+    // The same files to the same device while that send is still going: a
+    // double click, not a second send.
+    let mut key: Vec<String> = paths.iter().map(|p| p.display().to_string().to_lowercase()).collect();
+    key.sort();
+    let key = format!("{}|{}", peer.to_lowercase(), key.join("|"));
+    if !state.sending.lock().unwrap().insert(key.clone()) {
+        return Err(format!("Already sending those to {peer}: see Transfers."));
+    }
+    let gui = state.clone();
     tauri::async_runtime::spawn(async move {
+        // The transfer card reports progress and the outcome; the log keeps a record.
         match client::send(&app, ui.clone(), &peer, &paths).await {
             Ok(Outcome::Done(c)) => ui.log(format!("{peer} received {} file(s).", c.received)),
-            Ok(Outcome::Declined(reason)) => {
-                ui.log(format!("{peer} declined your files ({reason})."));
-                ui.toast("warn", format!("{peer} declined your files."));
-            }
-            Err(e) => {
-                ui.log(format!("Sending to {peer} failed: {e:#}"));
-                ui.toast("error", format!("Sending to {peer} failed: {e:#}"));
-            }
+            Ok(Outcome::Declined(reason)) => ui.log(format!("{peer} declined your files ({reason}).")),
+            Err(e) => ui.log(format!("Sending to {peer} failed: {e:#}")),
         }
+        gui.sending.lock().unwrap().remove(&key);
     });
     Ok(())
+}
+
+/// Cancel a transfer (the Cancel button on its card).
+#[tauri::command]
+fn transfer_cancel(window: WebviewWindow, id: u64) -> CmdResult<()> {
+    main_only(&window)?;
+    if filepigeon::progress::cancel(id) {
+        Ok(())
+    } else {
+        Err("That transfer has already finished.".into())
+    }
 }
 
 #[tauri::command]
@@ -1218,6 +1252,7 @@ fn main() {
                 service: Mutex::new(Service::default()),
                 status: Mutex::new(ServiceStatus { state: "starting".into(), message: String::new() }),
                 pairing: Mutex::new(None),
+                sending: Mutex::new(Default::default()),
                 invite_link: Mutex::new(linkscheme::find_in_args(std::env::args())),
                 dnd_items: Mutex::new(Vec::new()),
                 invisible_item: Mutex::new(None),
@@ -1262,6 +1297,7 @@ fn main() {
             invites_list,
             invite_revoke,
             invite_link_create,
+            transfer_cancel,
             invite_links_pending,
             invite_preview,
             take_invite_link,

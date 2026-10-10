@@ -7,7 +7,7 @@ use crate::daemon::{complete_message, usable_candidates};
 use crate::peergate::Knocker;
 use crate::text::display_safe;
 use crate::netutil::{local_candidates, BoundEndpoint};
-use crate::progress::{human, Progress};
+use crate::progress::{Phase, human, Progress};
 use crate::proto::{Complete, DirEntry, PeerRequest, PeerResponse, RdvRequest, RdvResponse};
 use crate::rdv_client;
 use crate::tls::{client_config, KeyPolicy, ALPN_PEER};
@@ -87,6 +87,15 @@ fn skip_local() -> bool {
 }
 
 impl Session {
+    /// For the transfer card: how the two PCs are connected.
+    fn route_label(&self) -> &'static str {
+        match self.route {
+            Route::Relay => "Relay",
+            _ if crate::netutil::is_private(self.conn.remote_address().ip()) => "Local network",
+            _ => "Direct",
+        }
+    }
+
     async fn close(self) {
         self.conn.close(0u32.into(), b"bye");
         self.ep.endpoint.wait_idle().await;
@@ -172,7 +181,10 @@ async fn connect(app: &App, peer_query: &str) -> Result<Session> {
     let direct = if force_relay() {
         Err(anyhow!("direct paths disabled by FILEPIGEON_FORCE_RELAY"))
     } else {
-        race(&ep, &cfg, &knocker, candidates, Duration::from_secs(10)).await
+        // A few seconds is enough for hole punching when it works at all; if
+        // this device needed the relay recently, give direct even less.
+        let budget = if crate::addrbook::relayed_recently(app, &peer.device_id) { 1500 } else { 3000 };
+        race(&ep, &cfg, &knocker, candidates, Duration::from_millis(budget)).await
     };
     let (conn, route) = match direct {
         Ok(conn) => {
@@ -189,6 +201,7 @@ async fn connect(app: &App, peer_query: &str) -> Result<Session> {
         },
     };
     rdv.close(0u32.into(), b"done");
+    crate::addrbook::note_route(app, &peer.device_id, matches!(route, Route::Relay));
     {
             let reknock = Some(keep_knocking(&ep, &conn, knocker));
             Ok(Session { ep, conn, peer, route, _reknock: reknock })
@@ -336,44 +349,58 @@ pub async fn send(app: &App, ui: Arc<dyn Ui>, peer_query: &str, paths: &[PathBuf
     if serde_json::to_vec(&offer)?.len() > crate::wire::MAX_REQUEST {
         bail!("that's too many files to offer at once ({}); send them in smaller batches", files.len());
     }
+    let peer = app.find_peer(peer_query)?;
+    // The card appears at once, while still connecting, and can be cancelled
+    // at any point.
+    let progress = Progress::begin(ui.clone(), &peer.name, Direction::Send, transfer_name(&metas), total, Phase::Connecting);
+    let result = tokio::select! {
+        r = send_inner(app, &ui, peer_query, &files, offer, &progress) => r,
+        _ = progress.cancelled() => Err(anyhow!("cancelled")),
+    };
+    match &result {
+        Ok(Outcome::Done(complete)) => {
+            let message = complete_message(complete, "Delivered");
+            progress.finish(if complete.failed.is_empty() {
+                TransferState::Done { message }
+            } else {
+                TransferState::Failed { message }
+            });
+        }
+        Ok(Outcome::Declined(reason)) => {
+            progress.finish(TransferState::Failed { message: format!("{} declined ({reason})", peer.name) })
+        }
+        Err(e) => progress.finish(crate::daemon::failure_state(e, &peer.name)),
+    }
+    result
+}
+
+async fn send_inner(
+    app: &App,
+    ui: &Arc<dyn Ui>,
+    peer_query: &str,
+    files: &[crate::transfer::LocalFile],
+    offer: PeerRequest,
+    progress: &Progress,
+) -> Result<Outcome> {
     let s = connect(app, peer_query).await?;
-    s.note_route(&ui);
+    s.note_route(ui);
+    progress.set_route(s.route_label());
+    progress.attach(&s.conn);
+    progress.set_phase(Phase::Waiting);
     let (mut send, mut recv) = s.conn.open_bi().await?;
     write_msg(&mut send, &offer).await?;
-    ui.log(format!(
-        "Offered {} file(s) ({}) to {}. Waiting for them to accept...",
-        files.len(),
-        human(total),
-        s.peer.name
-    ));
+    ui.log(format!("Offered {} file(s) to {}. Waiting for them to accept...", files.len(), s.peer.name));
 
     let resp = tokio::time::timeout(DECISION_WAIT, read_msg(&mut recv)).await.context("no answer")??;
     let outcome = match resp {
         PeerResponse::Accepted { offsets } => {
-            let progress = Progress::start(ui.clone(), &s.peer.name, Direction::Send, transfer_name(&metas), total);
-            let result = async {
-                send_files(&mut send, &files, &offsets, &progress).await?;
-                send.finish()?;
-                anyhow::Ok(read_msg::<_, Complete>(&mut recv).await?)
-            }
-            .await;
-            match result {
-                Ok(mut complete) => {
-                    // The receiver's report is peer-supplied text.
-                    complete.failed = complete.failed.iter().take(1000).map(|f| display_safe(f, 200)).collect();
-                    let message = complete_message(&complete, "Delivered");
-                    progress.finish(if complete.failed.is_empty() {
-                        TransferState::Done { message }
-                    } else {
-                        TransferState::Failed { message }
-                    });
-                    Outcome::Done(complete)
-                }
-                Err(e) => {
-                    progress.finish(TransferState::Failed { message: display_safe(&format!("{e:#}"), 300) });
-                    return Err(e);
-                }
-            }
+            progress.set_phase(Phase::Transferring);
+            send_files(&mut send, files, &offsets, progress).await?;
+            send.finish()?;
+            let mut complete: Complete = read_msg(&mut recv).await?;
+            // The receiver's report is peer-supplied text.
+            complete.failed = complete.failed.iter().take(1000).map(|f| display_safe(f, 200)).collect();
+            Outcome::Done(complete)
         }
         PeerResponse::Denied { reason } => Outcome::Declined(display_safe(&reason, 200)),
         _ => bail!("unexpected reply from {}", s.peer.name),
@@ -394,7 +421,10 @@ pub async fn browse(app: &App, peer_query: &str, path: &str) -> Result<Vec<DirEn
             .take(100_000)
             .map(|e| DirEntry { name: display_safe(&e.name, 255), ..e })
             .collect()),
-        PeerResponse::Denied { reason } => Err(anyhow!("denied: {}", display_safe(&reason, 200))),
+        PeerResponse::Denied { .. } => Err(anyhow!(
+            "{} hasn't let you browse their shared folders. They can turn on \"Can browse\" for you on their Devices page.",
+            s.peer.name
+        )),
         PeerResponse::Error { message } => Err(anyhow!(display_safe(&message, 200))),
         _ => Err(anyhow!("unexpected reply from {}", s.peer.name)),
     };
@@ -420,6 +450,8 @@ pub async fn get(app: &App, ui: Arc<dyn Ui>, peer_query: &str, path: &str, dest:
             let offsets = resume_offsets(dest, &s.peer.device_id, &files);
             write_msg(&mut send, &PeerResponse::Resume { offsets: offsets.clone() }).await?;
             let progress = Progress::start(ui.clone(), &s.peer.name, Direction::Receive, transfer_name(&files), total);
+            progress.set_route(s.route_label());
+            progress.attach(&s.conn);
             match recv_files(&mut recv, dest, &s.peer.device_id, &files, &offsets, &progress, &claims).await {
                 Ok(complete) => {
                     let message = complete_message(&complete, "Received");
@@ -434,7 +466,7 @@ pub async fn get(app: &App, ui: Arc<dyn Ui>, peer_query: &str, path: &str, dest:
                     Outcome::Done(complete)
                 }
                 Err(e) => {
-                    progress.finish(TransferState::Failed { message: display_safe(&format!("{e:#}"), 300) });
+                    progress.finish(crate::daemon::failure_state(&e, &s.peer.name));
                     return Err(e);
                 }
             }
